@@ -1,0 +1,195 @@
+//************************************
+//************************************
+//**          Functions             **
+//************************************
+//************************************
+
+//////////////////////////////////////////////////////////
+// EUCLIDGENERATOR creates a euclid rhythm
+/////////////////////////////////////////////////////////
+
+void EuclidGenerator(int buckets, int beats, int offsetnumber, int clumpy)//generates euclid rhythms
+{
+  Serial.println("calling Euclid");
+
+  //fill an array euclid[50] with bits
+  //providing euclid rhythyms for input "buckets" and "beats".
+  //The useful array size is the provided bucket size and must be handled by user
+
+  //The program works by making an array representing spaces between beats, loading the
+  //number of beats into the first bits of this array (e.g., three beats equals three array
+  //places set), then equalizing the values of
+  //the array (interatively subtracting from large array values and adding
+  //to smaller array values.  The space array then creates a beat array having
+  //those spaces. returns values in euclid[] global. offset shifts pattern by bins
+  //clump weakens the rules to allow uneven spacing
+
+  int euclidspace[50]; //array used to track spaces between beats
+  int tempbeats = 0;
+  int minspace = 0;
+  int minspaceindex = 0;
+  int maxspace = 0;
+  int maxspaceindex = 0;
+  int euclidindex = 0;
+  bool notdoneyet = true;
+
+  //build an array of spaces with beats installed
+  tempbeats = beats;
+  for (int x = 0; x < buckets; x++)
+  {
+    tempbeats--;
+    if (tempbeats > 0)euclidspace[x] = 0;  //first beats are packed
+    else if (tempbeats == 0)euclidspace[x] = buckets - beats; //last space is what is left
+    else if (tempbeats < 0)euclidspace[x] = -1; //after beats are placed
+
+  }
+  //now even out the buckets
+  //(1) find the minimum and maximum
+
+  notdoneyet = true;
+
+  while (notdoneyet == true)
+  {
+    minspace = 99;
+    minspaceindex = 0;
+    maxspace = -99;
+    maxspaceindex = 0;
+    for (int x = 0; x < buckets; x++)
+    {
+      if ((euclidspace[x] < minspace) && (euclidspace[x] >= 0))
+      {
+        minspace = euclidspace[x];
+        minspaceindex = x;
+      }
+      if (euclidspace[x] > maxspace)
+      {
+        maxspace = euclidspace[x];
+        maxspaceindex = x;
+      }
+    }
+    //(2) shuffle spaces from max to min
+    if (maxspace - clumpy - 1 > minspace) //without clumpy -1 is correct
+    {
+      euclidspace[minspaceindex]++; //even out buckets by shifts between max and min
+      euclidspace[maxspaceindex]--;
+    }
+    else notdoneyet = false;
+  }
+
+  //create the final beat array "euclid" matching the spaces
+  for (int x = 0; x < buckets; x++)euclid[x] = false; //create blank array
+
+  //create the beat array from the space array
+  euclidindex = 0;
+  for (int x = 0; x < buckets; x++)
+  {
+    if (euclidspace[x] != -1)
+    {
+      euclid[euclidindex] = true;
+      euclidindex = euclidindex + euclidspace[x] + 1;
+    }
+    else euclid[buckets - 1] = false; //set last bit to zero
+  }
+
+  //create offset
+  bool euclidrotate[50];
+  int y = offsetnumber;
+  for (int x = 0; x < buckets; x++)
+  {
+    euclidrotate[y] = euclid[x];
+    y++;
+    if (y >= buckets) y = 0;
+  }
+  for (int x = 0; x < 16; x++)drumcartridge[x] = 0;
+  for (int x = 0; x < buckets; x++)drumcartridge[x] = int(euclidrotate[x]);
+
+  if (beats == 0) for (int x = 0; x < buckets + 1; x++) euclid[x] = false; //if beats is zero null out
+
+  for (int x = 0; x < buckets; x++)
+  {
+    Serial.print(drumcartridge[x]);
+    Serial.print(":");
+  }
+  //just update the top row of notes
+}
+
+
+void acceltest(void)//output accelerometer data
+{
+  Serial.print("  \tZ:  "); Serial.print(myIMU.readFloatAccelZ());
+  Serial.println();
+  delay(200);
+}
+
+void acceleration_dump(void)  //debuging routine
+//useful for testing accelerometer
+{
+
+  Serial.print("  \tZ:  "); Serial.println(myIMU.readFloatAccelZ());
+  int indexer = 0;
+  Serial.print("acc_calibrationz:");
+  Serial.println(acc_calibrationz);
+  for (int p = 0; p < 20; p++)
+  {
+    if (p == 10) //!!
+    {
+      Serial.println("");
+      Serial.println("hit point");
+    }
+
+    Serial.print(" z:");
+    Serial.print(circularaccbufferz[circbuffpointer + indexer] - acc_calibrationz);
+    indexer++;
+    if (indexer + circbuffpointer > 19) indexer = -circbuffpointer; ///!!!!
+  }
+  Serial.println ("");
+  Serial.print ("  z cal raw:");
+  Serial.println (acc_calibrationz, 5);
+}
+
+void chargedata_dump(void) //debugging routine
+//useful for texting capacitive sensing and pad wiring
+{
+
+  for (int x = 0; x < 9; x++) //prints out all charge times
+  {
+    Serial.print(" pin:");
+    Serial.print(x);
+    Serial.print("=");
+    Serial.print(chargetime[x] );
+  }
+  Serial.println("");
+  for (int x = 0; x < 9; x++) //prints out all calibrations
+  {
+    Serial.print(" cal:");
+    Serial.print(x);
+    Serial.print("=");
+    Serial.print(cap_calibration[x]);
+  }
+
+  Serial.println("");
+  for (int x = 0; x < 9; x++) //prints out state
+  {
+    Serial.print(" pin:");
+    Serial.print(x);
+    Serial.print("=");
+    Serial.print(padactive[x]);
+  }
+
+  Serial.println("");
+  Serial.println("");
+  /*Serial.print ("padvol#1:  ");
+    Serial.print (padstate[1]);
+    Serial.print ("-xvalley: ");
+    Serial.print(-xaxisvalley);
+    Serial.println(""); */
+}
+
+
+//check for free RAM--thanks to jeelabs.org
+int freeRam ()
+{
+  extern int __heap_start, *__brkval;
+  int v;
+  return (int) &v - (__brkval == 0 ? (int) &__heap_start : (int) __brkval);
+}
