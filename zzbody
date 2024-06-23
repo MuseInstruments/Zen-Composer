@@ -1,0 +1,2487 @@
+
+
+
+
+
+//************************************
+//************************************
+//**          Set-Up                **
+//************************************
+//************************************
+
+void setup()
+{
+  // put your setup code here, to run once:
+  Serial.begin(9600);
+  delay(1000); //relax...
+  Serial.println("Processor came out of reset.\n");
+ MIDI.begin();
+
+  
+
+  //set up for accelerometer (https://learn.sparkfun.com/tutorials/lis3dh-hookup-guide/all)
+  // but hardware is in fact from Adafruit (Adafruit driver has strange bug?)
+  myIMU.settings.adcEnabled = 1;
+  myIMU.settings.tempEnabled = 1;
+  myIMU.settings.accelSampleRate = 400;  //Hz.  Can be: 0,1,10,25,50,100,200,400,1600,5000 Hz
+  myIMU.settings.accelRange = 2;      //Max G force readable.  Can be: 2, 4, 8, 16
+  myIMU.settings.xAccelEnabled = 0;
+  myIMU.settings.yAccelEnabled = 0;
+  myIMU.settings.zAccelEnabled = 1;
+
+  //Call .begin() to configure the IMU
+  myIMU.begin();
+
+  //pin assignments
+  //pinMode(LEDpin, OUTPUT);//teensy on-board LED
+  pinMode(Rled, OUTPUT);
+  pinMode(Bled, OUTPUT);
+  pinMode(Gled, OUTPUT);
+  //capacitor pad connections
+  pinMode(driverpin, OUTPUT);
+
+  pinMode(pot1pin, INPUT);
+  pinMode(pot2pin, INPUT);
+  pinMode(pot3pin, INPUT);
+
+  pinMode(pad0, INPUT);
+  pinMode(pad1, INPUT);
+  pinMode(pad2, INPUT);
+  pinMode(pad3, INPUT);
+  pinMode(pad4, INPUT);
+  pinMode(pad5, INPUT);
+  pinMode(pad6, INPUT);
+  pinMode(pad7, INPUT);
+  pinMode(pad8, INPUT);
+
+  pinMode(gate_pin, OUTPUT);
+  pinMode(cv_pin, OUTPUT);
+  pinMode(mod_pin, OUTPUT);
+  analogWriteFrequency(cv_pin, 585937);
+  //analogWriteFrequency(mod_pin , 585937);
+
+  totaltime=millis();
+  calstate=0;
+  cal_timer=millis();
+
+}//end setup
+
+//************************************
+//************************************
+//**      Main Loop                **
+//************************************
+//************************************
+
+void loop()
+{
+
+
+//initial calibration
+
+
+
+  //Get all parameters--test only
+  //  Serial.print("\nAccelerometer:\n");
+  //  Serial.print(" X = ");
+  //  Serial.println(myIMU.readFloatAccelX(), 4);
+  //  Serial.print(" Y = ");
+  //  Serial.println(myIMU.readFloatAccelY(), 4);
+  //  Serial.print(" Z = ");
+  //  Serial.println(myIMU.readFloatAccelZ(), 4);
+  //  delay(1000);
+
+  //***profiling tool
+  if (debugmode == 7)
+  {
+    profiletimedelta = micros() - profiletime;
+    profiletime = micros();
+  }
+
+
+
+  //***troubleshooting flags
+  debugmode = 4;
+  if (millis() > next + 500)
+  {
+    //debugmode 0 prints overflow
+    // debugmode 1 is off
+    //debugmode 2 plots capacitive values to arduino plot
+    if (debugmode == 3) acceleration_dump(); //outputs accelerometer values
+    if (debugmode == 4) chargedata_dump();//outputs capacitive values
+    if (debugmode == 6) acc_plot = true;//plots acceleration versus time (use Arduino plot)
+    if (debugmode == 7)//profiles loop
+    {
+      Serial.print("profiledeltatime:");
+      Serial.println(profiletimedelta);
+    }
+    next = millis();
+  }
+
+
+  //calibration onlyl when inactive for  2 seconds or totaltime<2000
+  if ((padactive[0] == HIGH) || (padactive[1] == HIGH) || (padactive[2] == HIGH) || (padactive[2] == HIGH)
+      || (padactive[4] == HIGH) || (padactive[5] == HIGH) || (padactive[6] == HIGH)
+      || (padactive[7] == HIGH) || (padactive[8] == HIGH) ||(totaltime+5000<millis()))
+  {
+    cal_timer = millis(); //calibration only when nothing is active
+    calstate = 0;
+  }
+
+  if ((calstate == 0) && (cal_timer + 1000) < millis()) //do tentative calibration
+  {
+    calstate = 1;
+    tempacc_calibrationz = myIMU.readFloatAccelZ();
+  }
+
+
+
+  if ((calstate == 1) && ((cal_timer + 2000) < millis())) //commit calibration if continuted quiet
+  {
+    calstate = 2;
+    for (int x = 0; x < 9; x++)  cap_calibration[x] = tempcap_calibration[x];
+    acc_calibrationz = tempacc_calibrationz;
+    delay(1000);
+  }
+
+
+
+  //************************************
+  //**         Touch Sensing          **
+  //************************************
+
+  /*
+     mostly this can be ignored as it simply senses the capacitanceh
+     of the pads.  Interesting outputs are padactive[x] indicating whether pad
+     is being touched , padvolume[x] indicating how hard most recent strike was; and padstate[x]
+     which provides persistant padactive values and must be reset.  See examples below
+  */
+
+  //***loop through each of 9 pads according to pnum
+  if (pnum < 8) pnum++;
+  else pnum = 0;
+  overflowx = 0;
+
+  //measure charge up time, then measure fall time
+  //to cut sensitivity to gate threshold level
+
+  //***set driver pin high and measure rise time of selected pad
+  digitalWrite(driverpin, HIGH);   // common driver pin high
+  starttime = micros();
+  while ((digitalRead(pad[pnum]) == LOW) && (overflowx == 0)) //digital read is pretty slow it seems
+  { //charge while loop
+    if (micros() - starttime > 1000)
+    {
+      overflowx = 1;
+      if (debugmode == 0) //debug output to console
+      {
+        Serial.print ("overflow up on pin:");
+        Serial.print(pnum);
+        Serial.println("");
+      }
+    }
+  } //end charge while loop
+  grabtime = micros() - starttime;// charge up time
+
+  //finish charging of input pin to full voltage
+  pinMode(pad[pnum], OUTPUT);
+  digitalWrite(pad[pnum], HIGH);
+  pinMode(pad[pnum], INPUT);
+
+  //set driver pin low and measure fall time of selected pad
+  //CHARGE DOWN
+  digitalWrite(driverpin, LOW);
+  starttime = micros();
+  while ((digitalRead(pad[pnum]) == HIGH) && (overflowx == 0))
+  { //discharging while loop
+    if (micros() - starttime > 1000)
+    {
+      overflowx = 1;
+      if (debugmode == 0) //debug mode console output
+      {
+        Serial.print ("overflow down on pin:");
+        Serial.print(pnum);
+        Serial.println("");
+      }
+    }
+  } //end discharging while loops
+
+  chargetime[pnum] = grabtime + micros() - starttime; //add rise and fall times together
+  //finish discharging of input pin to full voltage
+  pinMode(pad[pnum], OUTPUT);
+  digitalWrite(pad[pnum], LOW);
+  pinMode(pad[pnum], INPUT);
+
+  if (calstate == 1)  
+  {
+    tempcap_calibration[pnum] = chargetime[pnum]; //quiet time, grab calibration
+  }
+ 
+
+
+  //************************************
+  //**    End of Touch Sensing        **
+  //************************************
+
+  //************************************
+  //**         Touch Logic          **
+  //************************************
+
+  //60 hz reject*************************************************
+  integrate60 = 0;
+  for (int z = 0; z < 10; z++)
+  {
+    integrate60 = integrate60 + lpf[pnum][z];
+  }
+  integrate60 = integrate60 / 10;
+
+  /*
+     use Arduio plot to plot each capacitive value in different colors
+  */
+
+  if (debugmode == 2)
+  {
+    if (pnum < 9)
+    {
+      Serial.print(integrate60);
+      Serial.print (",");
+    }
+    if (pnum == 8)
+    {
+      Serial.print(hysteresislow);
+      Serial.print (",");
+      Serial.print(100);
+      Serial.print (",");
+      Serial.print(hysteresishigh);
+      Serial.print (",");
+      Serial.println(0);
+    }
+  }
+
+  //***************************************************************
+
+
+  //touch detected ****************************
+  if (chargetime[pnum] - cap_calibration[pnum] > hysteresishigh)
+  {
+    padactive[pnum] = HIGH;
+    hithappened = HIGH;
+    deadtime = millis();
+  }
+  else if (integrate60 < hysteresislow) padactive[pnum] = LOW;
+
+
+  lpf[pnum][lpfindex[pnum]] = chargetime[pnum] - cap_calibration[pnum];
+  lpfindex[pnum]++;
+  if (lpfindex[pnum] > 9) lpfindex[pnum] = 0;
+
+
+
+
+  //  //override on fast restrike
+  if ((padstate[pnum] == 4) && (padactive[pnum] == HIGH)) //ready to play new note
+  {
+    pitch = padlastnote[pnum];
+    MIDIchannel = padlastchannel[pnum];
+    usbMIDI.sendNoteOff(pitch, notevolume, MIDIchannel);
+    MIDI.sendNoteOff(pitch, notevolume, MIDIchannel);
+    padlasttime[pnum] = micros(); //keep this low as long as pad is held
+    circbuffpointer = 0;
+    plotonce = true;
+    padstate[pnum] = 1; //1 marks pending note before volume is determined
+  }
+
+  if ((padstate[pnum] == 0) && (padactive[pnum] == HIGH)) //ready to play new note
+  {
+    padlasttime[pnum] = micros(); //keep this low as long as pad is held
+    circbuffpointer = 0;
+    plotonce = true;
+    padstate[pnum] = 1; //1 marks pending note before volume is determined
+  }
+
+
+  //************************************
+  //** Volume (acceleration) Sensing  **
+  //************************************
+
+  //stall to collect acceleration data after pad hit
+  if (circbuffpointer == 10) //wait 10 loops (1/2 of buffer)after note hit, then find max
+  {
+    //**************************************************************
+    //***troubleshooting plot shows z accel and energy
+    if ((acc_plot == true) && (plotonce == true))
+    {
+      float integrate = 0;
+      plotonce = false;
+      Serial.print(" z:");
+      for (int x = 0; x < 9; x++)
+      {
+        Serial.print(5);
+        Serial.print(",");
+        Serial.print(-5);
+        Serial.print(",");
+        Serial.print((circularaccbufferz[x] - acc_calibrationz));
+        Serial.print(",");
+        integrate = integrate + abs(circularaccbufferz[x] - acc_calibrationz);
+        Serial.println((integrate));
+      }
+      for (int x = 0; x < 6; x++)//print separator line
+      {
+        Serial.print(5);
+        Serial.print(",");
+        Serial.print(-5);
+        Serial.print(",");
+        Serial.print(0);
+        Serial.print(",");
+        Serial.println(0);
+      }
+    }
+    //end of troublshoot plot**************************************
+
+    motionenergy = 0;
+    for (int x = 0; x < 10; x++) //find area under accellerometer curve after hit
+    {
+      motionenergy = motionenergy + abs(circularaccbufferz[x] - acc_calibrationz);
+
+    }
+
+    //load up pending all notes with volume numbers
+    for (int x = 0; x < 10; x++)
+    {
+      if (padstate[x] == 1)//todo:  make better velocity curve
+      {
+        //        Serial.print("motion energy:");
+        //        Serial.println(motionenergy);
+        padvolume[x] = map(motionenergy, 0, 5, 0, 127);
+        if (padvolume[x] > 127) padvolume[x] = 127;
+        if (padvolume[x] < 3) padvolume[x] = 3;
+        //piecewise velocity curve
+        if (padvolume[x] < 20) padvolume[x] = 10;
+        else if (padvolume[x] < 40) padvolume[x] = 32;
+        else if (padvolume[x] < 60) padvolume[x] = 80;
+        else if (padvolume[x] < 80) padvolume[x] = 96;
+        else if (padvolume[x] < 100) padvolume[x] = 112;
+        else  padvolume[x] = 127;
+        padstate[x] = 2;
+      }
+    }
+  }
+
+  //************************************
+  //**     End of Volume Sensing      **
+  //************************************
+
+
+
+  //************************************
+  //************************************
+  //**  Chordboard Module             **
+  //************************************
+  //************************************
+  /*
+      pads map to chords arranged in a circle of fifths
+  */
+
+
+  if (pot1state == 0)  //top potentiometer full CW
+  {
+    if (laststate != pot1state)
+    {
+      laststate = pot1state;
+      Serial.println("chord keyboard");
+      //mode change initializations
+      chordclock = 0;
+      chordnoteindex = 0;
+    }
+
+    MIDIchannel = MIDIchannel4;//change this to change the MIDI channel
+
+
+    //pad hit **************************************************
+    for (int x = 0; x < 9; x++)
+    {
+      if (padstate[x] == 2) //new "on" note
+      {
+        notevolume = padvolume[x];
+        if (notevolume < 60) notevolume = 60;
+        //check for concurrent button presses (reset note sequence if not)
+        livehit = 99;
+        for (int x = 0; x < 9; x++)if (padhistory[x] != 0) livehit = x;
+        if (livehit == 99) //no active pads
+        {
+          chordtime = millis() - 300; //if first button override clock
+          //int lefttime= chordtime + int(400*tempofactor)-millis();
+          //chordtime = millis()- 400-lefttime;//wait for next clock transition
+          chordclock = 0;
+          chordnoteindex = 0;
+
+          chordpadselect = x;
+        }
+        padhistory[x] = 1; //enroll new pad in stack
+
+        switch (x)
+        {
+          case 0:
+            chordpadprime = 0; //a new chord ready to play at seam
+            padstate[x] = 3;
+            break;
+          case 1:
+            chordpadprime = 1;
+            padstate[x] = 3;
+            break;
+          case 2:
+            chordpadprime = 2;
+            padstate[x] = 3;
+            break;
+          case 3:
+            chordpadprime = 3;
+            padstate[x] = 3;
+            break;
+          case 4:
+            chordpadprime = 4;
+            padstate[x] = 3;
+            break;
+          case 5:
+            chordpadprime = 5;
+            padstate[x] = 3;
+            break;
+          case 6:
+            chordpadprime = 6;
+            padstate[x] = 3;
+            break;
+          case 7:
+            chordpadprime = 7;
+            padstate[x] = 3;
+            break;
+          case 8:
+            chordpadprime = 8;
+            padstate[x] = 3;
+            break;
+          default:
+            // if nothing else matches, do the default
+            // default is optional
+            break;
+        }
+      }
+    }
+
+    //pad released **************************************************
+    for (int x = 0; x < 9; x++)
+    {
+      //no touch, MIDI sent, played for min duration 10us
+      if ((padactive[x] == LOW) && (padstate[x] == 3)) //need reset
+      {
+        padstate[x] = 4;
+        padhistory[x] = 0;
+        //check to see if other buttons pressed to replace this one
+        livehit = 99;
+        //pull previous button from stack
+        for (int x = 0; x < 9; x++)if (padhistory[x] != 0) livehit = x;
+        if (livehit != 99) chordpadprime = livehit;
+
+      }
+    }
+
+    if (chordtime + int(400 * tempofactor)  < millis()) //note sequence clock
+    {
+      chordtime = millis();
+      changeuptimer++;
+
+      //chord sequence randomizer
+      if (changeuptimer > crazy0)
+      {
+        crazy0 = random(2, 4);
+        changeuptimer = 0;
+        crazy1 = random(0, 2);
+        if (crazy1 > 1) crazy1 = 0;
+      } else
+      {
+        crazy0 = 0;
+        crazy1 = 0;
+      }
+
+      //chord note sequence clock
+      if (chordclock < chordpatternlength) chordclock++;
+      else
+      {
+        chordclock = 0;
+        chordnoteindex = 0;
+
+      };
+
+      //Serial.println(chordclock);
+
+      //only allow chord changes on seams (if concurrent pads pressed)
+      if ((chordclock % 4 == 0) && (onetime == true))
+      {
+        onetime = false;
+        chordpadselect = chordpadprime;
+        //Serial.println("changeup");
+      }
+      else onetime = true;
+
+      //close pending notes
+      for (int x=0; x < stackindex; x++)
+      {
+        usbMIDI.sendNoteOff(notestack[x], 0, MIDIchannel);
+        MIDI.sendNoteOff(notestack[x], 0, MIDIchannel);
+      }
+      stackindex = 0;
+
+
+
+      //background chord player
+      if (sequenceplay == true)
+      {
+        //        Serial.print("sequenceplay:");
+        //        Serial.println(sequenceplay);
+        //unsigned long testcrazy = millis();
+
+        if (chordpadselect == 0)
+        {
+          while ((chordpattern0[1][chordnoteindex] <= chordclock) && (chordnoteindex < 20))
+          {
+            if (chordpattern0[0][chordnoteindex] != 0)
+            {
+              usbMIDI.sendNoteOn(chordpattern0[0][chordnoteindex] + crazy1 * filigree, notevolume, MIDIchannel);
+              MIDI.sendNoteOn(chordpattern0[0][chordnoteindex] + crazy1 * filigree, notevolume, MIDIchannel);
+              notestack[stackindex] = chordpattern0[0][chordnoteindex] + crazy1 * filigree ;
+              if (stackindex < 20)stackindex++;
+            }
+            chordnoteindex++;
+          }
+          //if ((millis() - testcrazy) > 1)Serial.println(millis() - testcrazy);
+        }
+
+
+        if (chordpadselect == 1)
+        {
+          while ((chordpattern1[1][chordnoteindex] <= chordclock) && (chordnoteindex < 20))
+          {
+            if (chordpattern1[0][chordnoteindex] != 0)
+            {
+              usbMIDI.sendNoteOn(chordpattern1[0][chordnoteindex] + crazy1 * filigree , notevolume, MIDIchannel);
+              MIDI.sendNoteOn(chordpattern1[0][chordnoteindex] + crazy1 * filigree , notevolume, MIDIchannel);
+              notestack[stackindex] = chordpattern1[0][chordnoteindex] + crazy1 * filigree ;
+              if (stackindex < 20)stackindex++;
+            }
+            chordnoteindex++;
+          }
+        }
+
+        if (chordpadselect == 2)
+        {
+          while ((chordpattern2[1][chordnoteindex] <= chordclock) && (chordnoteindex < 20))
+          {
+            if (chordpattern2[0][chordnoteindex] != 0)
+            {
+              usbMIDI.sendNoteOn(chordpattern2[0][chordnoteindex] + crazy1 * filigree , notevolume, MIDIchannel);
+              MIDI.sendNoteOn(chordpattern2[0][chordnoteindex] + crazy1 * filigree , notevolume, MIDIchannel);
+              notestack[stackindex] = chordpattern2[0][chordnoteindex] + crazy1 * filigree ;
+              if (stackindex < 20)stackindex++;
+            }
+            chordnoteindex++;
+          }
+        }
+
+        if (chordpadselect == 3)
+        {
+          while ((chordpattern3[1][chordnoteindex] <= chordclock) && (chordnoteindex < 20))
+          {
+            if (chordpattern3[0][chordnoteindex] != 0)
+            {
+              usbMIDI.sendNoteOn(chordpattern3[0][chordnoteindex] + crazy1 * filigree , notevolume, MIDIchannel);
+              MIDI.sendNoteOn(chordpattern3[0][chordnoteindex] + crazy1 * filigree , notevolume, MIDIchannel);
+              notestack[stackindex] = chordpattern3[0][chordnoteindex] + crazy1 * filigree ;
+              if (stackindex < 20)stackindex++;
+            }
+            chordnoteindex++;
+          }
+        }
+
+        if (chordpadselect == 4)
+        {
+          while ((chordpattern4[1][chordnoteindex] <= chordclock) && (chordnoteindex < 20))
+          {
+            if (chordpattern4[0][chordnoteindex] != 0)
+            {
+              usbMIDI.sendNoteOn(chordpattern4[0][chordnoteindex] + crazy1 * filigree, notevolume, MIDIchannel);
+              MIDI.sendNoteOn(chordpattern4[0][chordnoteindex] + crazy1 * filigree, notevolume, MIDIchannel);
+              notestack[stackindex] = chordpattern4[0][chordnoteindex] + crazy1 * filigree ;
+              if (stackindex < 20)stackindex++;
+            }
+            chordnoteindex++;
+          }
+        }
+
+        if (chordpadselect == 5)
+        {
+          while ((chordpattern5[1][chordnoteindex] <= chordclock) && (chordnoteindex < 20))
+          {
+            if (chordpattern5[0][chordnoteindex] != 0)
+            {
+              usbMIDI.sendNoteOn(chordpattern5[0][chordnoteindex] + crazy1 * filigree, notevolume, MIDIchannel);
+              MIDI.sendNoteOn(chordpattern5[0][chordnoteindex] + crazy1 * filigree, notevolume, MIDIchannel);
+              notestack[stackindex] = chordpattern5[0][chordnoteindex] + crazy1 * filigree;
+              if (stackindex < 20)stackindex++;
+            }
+            chordnoteindex++;
+          }
+        }
+
+        if (chordpadselect == 6)
+        {
+          while ((chordpattern6[1][chordnoteindex] <= chordclock) && (chordnoteindex < 20))
+          {
+            if (chordpattern6[0][chordnoteindex] != 0)
+            {
+              usbMIDI.sendNoteOn(chordpattern6[0][chordnoteindex] + crazy1 * filigree, notevolume, MIDIchannel);
+              MIDI.sendNoteOn(chordpattern6[0][chordnoteindex] + crazy1 * filigree, notevolume, MIDIchannel);
+              notestack[stackindex] = chordpattern6[0][chordnoteindex] + crazy1 * filigree;
+              if (stackindex < 20)stackindex++;
+            }
+            chordnoteindex++;
+          }
+        }
+
+        if (chordpadselect == 7)
+        {
+          while ((chordpattern7[1][chordnoteindex] <= chordclock) && (chordnoteindex < 20))
+          {
+            if (chordpattern7[0][chordnoteindex] != 0)
+            {
+              usbMIDI.sendNoteOn(chordpattern7[0][chordnoteindex] + crazy1 * filigree, notevolume, MIDIchannel);
+              MIDI.sendNoteOn(chordpattern7[0][chordnoteindex] + crazy1 * filigree, notevolume, MIDIchannel);
+              notestack[stackindex] = chordpattern7[0][chordnoteindex] + crazy1 * filigree;
+              if (stackindex < 20)stackindex++;
+            }
+            chordnoteindex++;
+          }
+        }
+
+        if (chordpadselect == 8)
+        {
+          while ((chordpattern8[1][chordnoteindex] <= chordclock) && (chordnoteindex < 20))
+          {
+            if (chordpattern8[0][chordnoteindex] != 0)
+            {
+              usbMIDI.sendNoteOn(chordpattern8[0][chordnoteindex] + crazy1 * filigree, notevolume, MIDIchannel);
+              MIDI.sendNoteOn(chordpattern8[0][chordnoteindex] + crazy1 * filigree, notevolume, MIDIchannel);
+              notestack[stackindex] = chordpattern8[0][chordnoteindex] + crazy1 * filigree;
+              if (stackindex < 20)stackindex++;
+            }
+            chordnoteindex++;
+          }
+        }
+      }
+
+    }//end of clocking
+
+    // update check for any pad press to determine if chord sequence should be restarted
+    if ((padactive[0] == 0) && (padactive[1] == 0) && (padactive[2] == 0) && (padactive[3] == 0) &&
+        (padactive[4] == 0) && (padactive[5] == 0) && (padactive[6] == 0) && (padactive[7] == 0) &&
+        (padactive[8] == 0))
+    {
+      sequenceplay = false;
+    }
+    else sequenceplay = true;
+
+    if (pot2state != lastchordstate)
+    {
+      lastchordstate = pot2state;
+      switch (pot2state)//change these values to change chord sequences
+      {
+        case 0:
+          filigree = 0; //random embellishments
+          patternseam = patternseamA;  //where the sequence can be restarted
+          chordpatternlength = chordpatternAlength;
+          for (int x = 0; x < 20; x++)
+          {
+            chordpattern0[0][x] = chordpatternA0[0][x];
+            chordpattern0[1][x] = chordpatternA0[1][x];
+            chordpattern1[0][x] = chordpatternA1[0][x];
+            chordpattern1[1][x] = chordpatternA1[1][x];
+            chordpattern2[0][x] = chordpatternA2[0][x];
+            chordpattern2[1][x] = chordpatternA2[1][x];
+            chordpattern3[0][x] = chordpatternA3[0][x];
+            chordpattern3[1][x] = chordpatternA3[1][x];
+            chordpattern4[0][x] = chordpatternA4[0][x];
+            chordpattern4[1][x] = chordpatternA4[1][x];
+            chordpattern5[0][x] = chordpatternA5[0][x];
+            chordpattern5[1][x] = chordpatternA5[1][x];
+            chordpattern6[0][x] = chordpatternA6[0][x];
+            chordpattern6[1][x] = chordpatternA6[1][x];
+            chordpattern7[0][x] = chordpatternA7[0][x];
+            chordpattern7[1][x] = chordpatternA7[1][x];
+            chordpattern8[0][x] = chordpatternA8[0][x];
+            chordpattern8[1][x] = chordpatternA8[1][x];
+          }
+          break;
+        case 1:
+          filigree = 0;
+          chordpatternlength = chordpatternBlength;
+          patternseam = patternseamB;
+          for (int x = 0; x < 20; x++)
+          {
+            chordpattern0[0][x] = chordpatternB0[0][x];
+            chordpattern0[1][x] = chordpatternB0[1][x];
+            chordpattern1[0][x] = chordpatternB1[0][x];
+            chordpattern1[1][x] = chordpatternB1[1][x];
+            chordpattern2[0][x] = chordpatternB2[0][x];
+            chordpattern2[1][x] = chordpatternB2[1][x];
+            chordpattern3[0][x] = chordpatternB3[0][x];
+            chordpattern3[1][x] = chordpatternB3[1][x];
+            chordpattern4[0][x] = chordpatternB4[0][x];
+            chordpattern4[1][x] = chordpatternB4[1][x];
+            chordpattern5[0][x] = chordpatternB5[0][x];
+            chordpattern5[1][x] = chordpatternB5[1][x];
+            chordpattern6[0][x] = chordpatternB6[0][x];
+            chordpattern6[1][x] = chordpatternB6[1][x];
+            chordpattern7[0][x] = chordpatternB7[0][x];
+            chordpattern7[1][x] = chordpatternB7[1][x];
+            chordpattern8[0][x] = chordpatternB8[0][x];
+            chordpattern8[1][x] = chordpatternB8[1][x];
+          }
+          break;
+        case 2:
+          filigree = 12;
+          chordpatternlength = chordpatternClength;
+          patternseam = patternseamC;
+          for (int x = 0; x < 20; x++)
+          {
+            chordpattern0[0][x] = chordpatternC0[0][x];
+            chordpattern0[1][x] = chordpatternC0[1][x];
+            chordpattern1[0][x] = chordpatternC1[0][x];
+            chordpattern1[1][x] = chordpatternC1[1][x];
+            chordpattern2[0][x] = chordpatternC2[0][x];
+            chordpattern2[1][x] = chordpatternC2[1][x];
+            chordpattern3[0][x] = chordpatternC3[0][x];
+            chordpattern3[1][x] = chordpatternC3[1][x];
+            chordpattern4[0][x] = chordpatternC4[0][x];
+            chordpattern4[1][x] = chordpatternC4[1][x];
+            chordpattern5[0][x] = chordpatternC5[0][x];
+            chordpattern5[1][x] = chordpatternC5[1][x];
+            chordpattern6[0][x] = chordpatternC6[0][x];
+            chordpattern6[1][x] = chordpatternC6[1][x];
+            chordpattern7[0][x] = chordpatternC7[0][x];
+            chordpattern7[1][x] = chordpatternC7[1][x];
+            chordpattern8[0][x] = chordpatternC8[0][x];
+            chordpattern8[1][x] = chordpatternC8[1][x];
+          }
+          break;
+        case 3:
+          //place for more chord sequences
+          break;
+        case 4:
+          //place for more chord sequences
+          break;
+        case 5:
+          //place for more chord sequences
+          break;
+        case 6:
+          //place for more chord sequences
+          break;
+      }
+    }
+
+    //adjust tempo of sequence with potentiometer 3
+    tempofactor = analogRead(pot3pin);
+    tempofactor = map(tempofactor, 0, 1024, 10, 100);
+    tempofactor = tempofactor / 100;
+    if (abs(tempofactor - lasttempofactor) > .1)lasttempofactor = tempofactor;
+
+  }
+
+  //************************************
+  //**   end chordboard mode 2 **
+  //************************************
+
+
+
+
+
+  //************************************
+  //************************************
+  //**  Standard Keyboard Module     **
+  //************************************
+  //************************************
+  /*
+    pads map to individual notes of
+    selected scale
+  */
+
+  if (pot1state == 1)
+  {
+    if (laststate != pot1state)
+    {
+      laststate = pot1state;
+      Serial.println("standard keyboard");
+      //delay(300);
+    }
+
+    //pad touched **************************************************
+    for (int x = 0; x < 9; x++)
+    {
+      if (padstate[x] == 2)
+      {
+        notevolume = padvolume[x];
+        padstate[x] = 3; //3 is ready for note off
+
+        //default presets for pot 2
+        switch (pot2state)//change these values to change channels and key mappings
+        {
+          case 0:
+            pitch = CmajS[x] + transpose - 12;
+            MIDIchannel = MIDIchannel3;
+            break;
+          case 1:
+            pitch = pentatonicC[x] + transpose;
+            MIDIchannel = MIDIchannel3;
+            break;
+          case 2:
+            pitch = hangdrum[x] + transpose;
+            MIDIchannel = MIDIchannel4;
+            break;
+          case 3:
+            pitch = Cmin[x] + transpose;
+            MIDIchannel = MIDIchannel4;
+            break;
+          case 4:
+            pitch = akebono[x] + transpose;
+            MIDIchannel = MIDIchannel4;
+            break;
+          case 5:
+            pitch = realdrum[x]; //don't transpose drums
+            MIDIchannel = MIDIchannel0;
+            break;
+          case 6:
+            pitch = Cmaj[x] - 24 + transpose;
+            MIDIchannel = MIDIchannel1;
+            break;
+        }
+        padlastchannel[x] = MIDIchannel;
+        lastpitch[x] = pitch;
+        //stub for microtonals if desired
+        //        if ((x == 2) || (x == 4) || (x == 7))usbMIDI.sendPitchBend(6111, MIDIchannel);
+        //        else usbMIDI.sendPitchBend(8192, MIDIchannel);//microtonal--works for Ableton, may need to set pitchbend factors
+        usbMIDI.sendNoteOn(pitch, notevolume, MIDIchannel);
+        MIDI.sendNoteOn(pitch, notevolume, MIDIchannel);
+        //stub for eurorack*******************************************
+        float Hzvalue = 440 * pow(2, ((float(pitch) - 69) / 12));
+        analogWrite(cv_pin, int(77 * sqrt(Hzvalue / 440)));
+        digitalWrite(gate_pin, LOW);
+        float Modvalue = (float(notevolume) / 128) * 255;
+        if (Modvalue > 255) Modvalue = 255;
+        analogWrite(mod_pin, int(Modvalue));
+        //end of eurorack **********************************************
+      }
+    }
+    // pot3read = (analogRead(pot3pin));
+    //    if (abs(pot3read - earlier3read) > 5)
+    //    {
+    //      earlier3read=pot3read;
+    //      int bendy=map(pot3read, 0, 1024,0,16383);
+    //     usbMIDI.sendPitchBend(bendy, MIDIchannel);
+    //     Serial.print("bendy:");
+    //     Serial.print(bendy);
+    //     Serial.print("  chan:");
+    //     Serial.println(MIDIchannel);
+    //
+    //    }
+    //pad released **************************************************
+    for (int x = 0; x < 9; x++)
+    {
+      //no touch, MIDI sent, played for min duration 10us
+      if ((padactive[x] == LOW) && (padstate[x] == 3)) //need reset
+      {
+        padstate[x] = 4;
+      }
+    }
+
+    //normal turn off notes after time out **************************************************
+    for (int x = 0; x < 9; x++)
+    {
+      //no touch, MIDI sent, played for min duration 10us
+      if ((padstate[x] == 4) ) //need reset
+      {
+        padstate[x] = 0;
+        MIDIchannel = padlastchannel[x];
+        usbMIDI.sendNoteOff(lastpitch[x], notevolume, MIDIchannel);
+        MIDI.sendNoteOff(lastpitch[x], notevolume, MIDIchannel);
+        digitalWrite(gate_pin, HIGH);
+      }
+    }
+  }
+  //************************************
+  //**  Standard Keyboard End        **
+  //************************************
+
+
+  //************************************
+  //************************************
+  //**  Workflow Module               **
+  //************************************
+  //************************************
+
+  /*
+     uses arm button to sucessively record drums
+     MIDI0, bassline MIDI1, harmony chords MIDI3
+     and Melody MIDI4
+  */
+
+  if (pot1state == 2)
+  {
+    if (laststate != pot1state)
+    {
+      laststate = pot1state;
+      Serial.println("workflow");
+
+      loopstate = 0;
+      loopindex = 0;
+      for (int x = 0; x < 100; x++)
+      {
+        loopvolume[x] = 0; //flush recording buffer
+        loopvolume2[x] = 0;
+        loopvolume3[x] = 0;
+      }
+      MIDIchannel = MIDIchannel0;
+    }
+    //------------------------------------------
+    //*** workflow: new on note  **************
+    //------------------------------------------
+    for (int x = 0; x < 9; x++)
+    {
+      if (padstate[x] == 2)//new "on" note
+      {
+
+
+        //------------------------------------------
+        //*** workflow state machine  **************
+        //------------------------------------------
+        //*** state advance button detect  **************
+        if ((x == 5) && (bouncemillis + 200 < millis())) //detect loop trigger button to advance states
+        {
+          bouncemillis = millis();
+          state_change_trigger = true; //center lower button is loop control
+          padstate[x] = 3;
+        }
+
+        //first loop begin***********************
+        if ((loopstate == 0) && (state_change_trigger == true)) //move to armed mode for drums
+        {
+          state_change_trigger = false;
+          loopstate = 1;
+          for (int x = 0; x < 100; x++) loopvolume[x] = 0; //flush recording buffer
+          loopindex = 0;
+          Gledinput = 3;//analogWrite(Gled, 100);
+          armed = true;
+          MIDIchannel = MIDIchannel0; //drum instrument
+        }
+
+        if ((loopstate == 1) && (x != 5)) //first drum note after trigger
+        {
+          loopstarttime = millis();
+          loopstate = 2; //now actively recording
+          loopindex = 0;
+        }
+
+        if ((loopstate == 2) && (state_change_trigger == true)) //move to drum player mode
+        {
+          state_change_trigger = false;
+          havedata1 = true;
+          looptime[loopindex] = millis() - loopstarttime; //one more record of end time
+          loopnote[loopindex] = 0;
+          loopvolume[loopindex] = 0;
+          loopindex++;
+          if (loopindex > 98) loopstate = 3; //cut??
+          loopstarttime = millis();
+          loopend = loopindex;
+          loopindex = 0;
+          loopstate = 3; //now playing
+          Gledinput = 0; //Gledinput=0;//analogWrite(Gled,256);
+          armed = false;
+          MIDIchannel = MIDIchannel1; //bass instrument
+        }
+
+        //second loop begin***********************
+        if ((loopstate == 3) && (state_change_trigger == true)) //move to armed mode for bass
+        {
+          state_change_trigger = false;
+          loopstate = 3.5;
+          loopindex2 = 0;
+          for (int x = 0; x < 100; x++) loopvolume2[x] = 0; //flush recording buffer
+          Gledinput = 3; //analogWrite(Gled, 100);
+          armed = true;
+        }
+
+        if ((loopstate == 3.5) && (x != 5)) //first bass note after trigger
+        {
+          loopstarttime2 = millis();
+          loopsynchtime2 = millis() - loopstarttime; //lock to first loop time
+          loopstate = 4; //now actively recording
+          loopindex = 0;
+        }
+
+        if ((loopstate == 4) && (state_change_trigger == true)) //move to play bass
+        {
+          state_change_trigger = false;
+          looptime2[loopindex2] = millis() - loopstarttime2; //one more record of end time
+          loopnote2[loopindex2] = pitch;
+          loopvolume2[loopindex2] = 0;
+          havedata2 = true;
+          loopend2 = loopindex2;
+          loopstate = 5;
+          loopindex2 = 0;
+          Gledinput = 0; //Gledinput=0;//analogWrite(Gled,256);
+          armed = false;
+          MIDIchannel = MIDIchannel2; //chord instrument
+          waittoggle1 = true;
+          if (loopsynchtime2 < millis() - loopstarttime)rollover1 = false; //wait for next rollover
+        }
+
+        //third loop begin***********************
+        if ((loopstate == 5) && (state_change_trigger == true)) //move to armed chords mode
+        {
+          state_change_trigger = false;
+          loopindex3 = 0;
+          loopstate = 6;
+          for (int x = 0; x < 1000; x++) loopvolume3[x] = 0; //flush recording buffer
+          Gledinput = 3; //analogWrite(Gled, 100);
+          armed = true;
+          loopsynchtime3 = millis() - loopstarttime; //record chord start for later loops
+          loopstarttime3 = millis();
+        }
+
+        if ((loopstate == 6) && (state_change_trigger == true)) //move to play buffer
+        {
+          havedata3 = true;
+          state_change_trigger = false;
+          loopstate = 7;
+          loopend3 = loopindex3;
+          loopindex3 = 0;
+          armed = false;
+          Gledinput = 0;; //Gledinput=0;//analogWrite(Gled,256);
+          waittoggle2 = false;
+          MIDIchannel = MIDIchannel3; //melody instrument
+        }
+
+        // reset
+        if ((loopstate == 7) && (state_change_trigger == true)) //turn off playing and reset
+        {
+          state_change_trigger = false;
+          for (int z = 20; z < 90; z++)
+          {
+           usbMIDI.sendNoteOff(z,  0, MIDIchannel0); //turn off
+            MIDI.sendNoteOff(z,  0, MIDIchannel0); //turn off
+          }
+          for (int z = 20; z < 90; z++)
+          {
+            usbMIDI.sendNoteOff(z,  0, MIDIchannel1); //turn off
+            MIDI.sendNoteOff(z,  0, MIDIchannel1); //turn off
+          }
+          for (int z = 20; z < 90; z++)
+          {
+            usbMIDI.sendNoteOff(z,  0, MIDIchannel2); //turn off
+            MIDI.sendNoteOff(z,  0, MIDIchannel2); //turn off
+          }
+          for (int z = 20; z < 90; z++)
+          {
+            usbMIDI.sendNoteOff(z,  0, MIDIchannel3); //turn off
+            MIDI.sendNoteOff(z,  0, MIDIchannel3); //turn off
+          }
+          for (int x = 0; x < 100; x++) loopvolume[x] = 0; //flush recording buffer
+          for (int x = 0; x < 100; x++) loopvolume2[x] = 0; //flush recording buffer
+          for (int x = 0; x < 100; x++) loopvolume3[x] = 0; //flush recording bufferall in-flight notes
+          havedata1 = false;
+          havedata2 = false;
+          havedata3 = false;
+          loopstate = 0;
+          loopindex = 0;
+          MIDIchannel = MIDIchannel0;
+          Bledinput = 3; //analogWrite(Bled, 100);
+          Bledtimeout = millis() + 1000;
+          //          delay(1000);
+          //           Bledinput=0;analogWrite(Bled, 256);
+        }
+        //------------------------------------------
+        //end of state machine logic **************
+        //------------------------------------------
+
+        //------------------------------------------
+        // real-time note player   **************
+        //------------------------------------------
+        if (loopstate <= 2) //play drums
+        {
+          pitch = realdrum[x];
+          notevolume = padvolume[x];
+          padstate[x] = 3; //3 is ready for note off
+          if (x != 5)
+          {
+            usbMIDI.sendNoteOn(pitch, notevolume, MIDIchannel);
+            MIDI.sendNoteOn(pitch, notevolume, MIDIchannel);
+          }
+        }
+
+        if ((loopstate > 2) && (loopstate < 5)) //play bass
+        {
+          pitch = transposearray[currentchordnote][x]; //
+          notevolume = padvolume[x];
+          padstate[x] = 3; //3 is ready for note off
+          if (x != 5)
+          {
+            usbMIDI.sendNoteOn(pitch, notevolume, MIDIchannel);
+            MIDI.sendNoteOn(pitch, notevolume, MIDIchannel);
+          }
+        }
+
+        if ((loopstate >= 5) && (loopstate < 7)) //play chord
+        {
+          pitch0 = circleFive[x][0];
+          pitch1 = circleFive[x][1];
+          pitch2 = circleFive[x][2];
+          lastchordindex = x;
+          if (x != 5)
+          {
+            usbMIDI.sendNoteOn(pitch0, notevolume, MIDIchannel);
+            MIDI.sendNoteOn(pitch0, notevolume, MIDIchannel);
+          }
+          if (x != 5)
+          {
+            usbMIDI.sendNoteOn(pitch1, notevolume, MIDIchannel);
+            MIDI.sendNoteOn(pitch1, notevolume, MIDIchannel);
+          }
+          if (x != 5)
+          {
+            usbMIDI.sendNoteOn(pitch2, notevolume, MIDIchannel);
+            MIDI.sendNoteOn(pitch2, notevolume, MIDIchannel);
+          }
+          padstate[x] = 3; //3 is ready for note off
+        }
+
+        if (loopstate > 6) //play melody
+        {
+          pitch = scalesetC[x];
+          notevolume = padvolume[x];
+          if (pot2state == 0) pitch = transposearray[currentchordnote][x] + 24;
+          else pitch = Cmaj[x] + 12;
+          //if (1) pitch = transposearray[currentchordnote][x] + 24; //
+          chordcapture[x] = currentchordnote;
+          padstate[x] = 3; //3 is ready for note off
+          Serial.print("mplaying:");
+          Serial.println(pitch);
+          Serial.println("");
+          if (x != 5)
+          {
+            usbMIDI.sendNoteOn(pitch, notevolume, MIDIchannel);
+            MIDI.sendNoteOn(pitch, notevolume, MIDIchannel);
+          }
+        }
+        //------------------------------------------
+        // note on recorder   **************
+        //------------------------------------------
+
+        if (loopstate == 2) // actively recording on note drum loop
+        {
+          loopMIDI = MIDIchannel; //save for later play with different channel
+          looptime[loopindex] = millis() - loopstarttime;
+          loopnote[loopindex] = x;
+          loopvolume[loopindex] = notevolume;
+          loopindex++;
+          if (loopindex > 98) loopstate = 3;
+        }
+
+        if (loopstate == 4)  // actively recording on note bass loop
+        {
+          loopMIDI2 = MIDIchannel; //save for later play with different channel
+          looptime2[loopindex2] = millis() - loopstarttime2;
+          loopnote2[loopindex2] = x;// record index not pitch for later tranpostion ;
+          loopvolume2[loopindex2] = notevolume;
+          loopindex2++;
+          if (loopindex2 > 98) loopstate = 5;
+        }
+
+        if ((loopstate == 6) && (x != 5)) // actively recording chord loop
+        {
+          // record a single chord designator
+          loopMIDI3 = MIDIchannel; //save for later play with different channel
+          looptime3[loopindex3] = millis() - loopstarttime3;
+          loopnote3[loopindex3] = x;
+          loopvolume3[loopindex3] = notevolume;
+          loopindex3++;
+          if (loopindex3 > 999) loopstate = 7;
+          //if (x != 5)currentchordnote = x;
+        }
+
+      }// detect hits
+    }// cycle through pads for hit
+
+    //------------------------------------------
+    // workflow: new off note **************
+    //------------------------------------------
+    for (int x = 0; x < 9; x++)// state for interruption
+    {
+      //no touch, MIDI sent, played for min duration 10us
+      if ((padactive[x] == LOW) && (padstate[x] == 3)) //need reset
+      {
+        padstate[x] = 4;
+      }
+    }
+
+    for (int x = 0; x < 9; x++)
+    {
+      if (padstate[x] == 4) //found an off pad
+      {
+
+        //***  real-time note off player   **************
+
+        if (loopstate <= 2 ) //play drums
+        {
+          pitch = realdrum[x];
+          //Serial.println("drums");
+          padstate[x] = 0; // 0 is reset for new touch
+          if (x != 5)
+          {
+            usbMIDI.sendNoteOff(pitch, 0, MIDIchannel);
+            MIDI.sendNoteOff(pitch, 0, MIDIchannel);
+          }
+        }
+
+        if ((loopstate > 2) && (loopstate < 5)) //play bass
+        { //
+          pitch = transposearray[currentchordnote][x];
+          padstate[x] = 0;
+          if (x != 5)
+          {
+            usbMIDI.sendNoteOff(pitch, 0, MIDIchannel);
+            MIDI.sendNoteOff(pitch, 0, MIDIchannel);
+          }
+        }
+
+        if ((loopstate >= 5) && (loopstate < 7)) //play chord
+        {
+          //Serial.println("chord");
+          padstate[x] = 0;
+          pitch0 = circleFive[x][0];
+          pitch1 = circleFive[x][1];
+          pitch2 = circleFive[x][2];
+          lastchordindex = x;
+          if (x != 5)
+          {
+            usbMIDI.sendNoteOn(pitch0, 0, MIDIchannel);
+            MIDI.sendNoteOn(pitch0, 0, MIDIchannel);
+          }
+          if (x != 5)
+          {
+            usbMIDI.sendNoteOn(pitch1, 0, MIDIchannel);
+            MIDI.sendNoteOn(pitch1, 0, MIDIchannel);
+          }
+          if (x != 5)
+          {
+            usbMIDI.sendNoteOn(pitch2, 0, MIDIchannel);
+            MIDI.sendNoteOn(pitch2, 0, MIDIchannel);
+          }
+        }
+
+        if (loopstate > 6) //play melody
+        {
+          //Serial.println("melody");
+          Serial.print("chordcapture[x]");
+          Serial.println(chordcapture[x]);
+          if (pot2state == 0) pitch = transposearray[chordcapture[x]][x] + 24;
+          else pitch = Cmaj[x] + 12;
+          notevolume = padvolume[x];
+          padstate[x] = 0;
+          if (x != 5)
+          {
+            usbMIDI.sendNoteOff(pitch, 0, MIDIchannel);
+            MIDI.sendNoteOff(pitch, 0, MIDIchannel);
+          }
+        }
+
+        //***  note-off recorder  ***********
+        if (loopstate == 2) // actively recording drum loop
+        {
+          loopMIDI = MIDIchannel; //save for later play with different channel
+          looptime[loopindex] = millis() - loopstarttime;
+          loopnote[loopindex] = x;
+          loopvolume[loopindex] = 0;
+          loopindex++;
+          if (loopindex > 98) loopstate = 3;
+        }
+
+        if (loopstate == 4)  // actively recording second loop
+        {
+          loopMIDI2 = MIDIchannel; //save for later play with different channel
+          looptime2[loopindex2] = millis() - loopstarttime2;
+          loopnote2[loopindex2] = x;// record index not pitch for later tranpostion ;
+          loopvolume2[loopindex2] = 0;
+          loopindex2++;
+          if (loopindex2 > 98) loopstate = 5;
+        }
+
+        if ((loopstate == 6) && (x != 5)) // actively recording 3rd loop
+        {
+          // record a single chord designator
+          loopMIDI3 = MIDIchannel; //save for later play with different channel
+          looptime3[loopindex3] = millis() - loopstarttime3;
+          loopnote3[loopindex3] = x;
+          loopvolume3[loopindex3] = 0;
+          loopindex3++;
+          if (loopindex3 > 999) loopstate = 7;
+        }
+      } //found off pad
+    }//cycle through pads for off states
+
+
+    //***recorded note loop player    **************
+
+    if (havedata1 == true)//drum play
+    {
+      if (millis() > looptime[loopindex] + loopstarttime) //play recorded notes
+      {
+        usbMIDI.sendNoteOn(realdrum[loopnote[loopindex]], loopvolume[loopindex], loopMIDI);
+        MIDI.sendNoteOn(realdrum[loopnote[loopindex]], loopvolume[loopindex], loopMIDI);
+        loopindex++;
+        if ((loopindex > 98) || (loopindex > loopend))
+        {
+          loopindex = 0;
+          loopstarttime = millis();
+          Rledinput = 4;
+          Rledtimeout = millis() + 250;
+          Gledinput = 0;
+          turnofftoggle = true;
+          turnofftime = millis();
+          rollover1 = true;
+          rollover2 = true;
+        }
+      }
+    }
+
+    if ((havedata2 == true) && (waittoggle1 == false)) //play recorded bass notes
+    {
+      if (millis() > looptime2[loopindex2] + loopstarttime2) //play recorded notes
+      {
+        usbMIDI.sendNoteOn(transposearray[currentchordnote][loopnote2[loopindex2]], loopvolume2[loopindex2], loopMIDI2);
+        MIDI.sendNoteOn(transposearray[currentchordnote][loopnote2[loopindex2]], loopvolume2[loopindex2], loopMIDI2);
+        if (loopindex2 < loopend2) loopindex2++;
+        else
+        {
+          waittoggle1 = true;
+          if (loopsynchtime2 > millis() - loopstarttime) rollover1 = true;
+          else rollover1 = false;
+        }
+      }
+    }
+
+    if ((havedata3 == true) && (waittoggle2 == false))//play recorded chord notes
+    {
+      if (millis() > looptime3[loopindex3] + loopstarttime3) //play recorded chord notes
+      {
+        //Serial.print(" at chord player ");
+        pitch0 = circleFive[loopnote3[loopindex3]][0];
+        pitch1 = circleFive[loopnote3[loopindex3]][1];
+        pitch2 = circleFive[loopnote3[loopindex3]][2];
+        if ((loopindex3 != 0) && (loopindex3 != loopend3)) currentchordnote = loopnote3[loopindex3];
+        usbMIDI.sendNoteOn(pitch0,   loopvolume3[loopindex3], loopMIDI3);
+        usbMIDI.sendNoteOn(pitch1,  loopvolume3[loopindex3], loopMIDI3);
+        usbMIDI.sendNoteOn(pitch2,  loopvolume3[loopindex3], loopMIDI3);
+        MIDI.sendNoteOn(pitch0,   loopvolume3[loopindex3], loopMIDI3);
+        MIDI.sendNoteOn(pitch1,  loopvolume3[loopindex3], loopMIDI3);
+        MIDI.sendNoteOn(pitch2,  loopvolume3[loopindex3], loopMIDI3);
+        if (loopindex3 < loopend3) loopindex3++;
+        else
+        {
+          waittoggle2 = true;
+          if (loopsynchtime3 > millis() - loopstarttime)
+          {
+            rollover2 = true; //wait for next rollover
+            Serial.println("waiting for rollover2");
+          }
+          else rollover2 = false;
+        }
+      }
+    }
+
+
+
+    if ((waittoggle1 == true) && (loopsynchtime2 < millis() - loopstarttime) && (rollover1 == true))
+    {
+      waittoggle1 = false;
+      loopstarttime2 = millis();
+      loopindex2 = 0;
+      rollover1 = false;
+    }
+
+    if ((waittoggle2 == true) && (loopsynchtime3 < millis() - loopstarttime) && (rollover2 == true))
+    {
+      waittoggle2 = false;
+      loopstarttime3 = millis();
+      loopindex3 = 0;
+      rollover2 = false;
+    }
+
+  } //end pot state = 2
+  //************************************
+  //**  Workflow End                  **
+  //************************************
+
+
+  //************************************
+  //************************************
+  //**  Dual Board Module             **
+  //************************************
+  //************************************
+
+  /*
+     right three pads select a chord
+     left 6 pads are chord notes for arpeggiation
+  */
+  if (pot1state == 3)
+  {
+    if (laststate != pot1state)
+    {
+      laststate = pot1state;
+      Serial.println("dual board");
+      //delay(300);
+      MIDIchannel = MIDIchannel2;
+    }
+
+    //note pad touched **************************************************
+    //select chord
+    if ((padactive[6] == false) && (padactive[7] == false) && (padactive[8] == false)) chordselect = 3;
+    else if ((padactive[6] == false) && (padactive[7] == false) && (padactive[8] == true)) chordselect = 7;
+    else if ((padactive[6] == false) && (padactive[7] == true) && (padactive[8] == false)) chordselect = 6;
+    else if ((padactive[6] == false) && (padactive[7] == true) && (padactive[8] == true)) chordselect = 2;
+    else if ((padactive[6] == true) && (padactive[7] == false) && (padactive[8] == false)) chordselect = 4;
+    else if ((padactive[6] == true) && (padactive[7] == false) && (padactive[8] == true)) chordselect = 1;
+    else if ((padactive[6] == true) && (padactive[7] == true) && (padactive[8] == false)) chordselect = 5;
+    else if ((padactive[6] == true) && (padactive[7] == true) && (padactive[8] == true)) chordselect = 8;;
+
+    for (int x = 0; x < 6; x++)
+    {
+      if (padstate[x] == 2)
+      {
+        notevolume = padvolume[x];
+        padstate[x] = 3; //3 is ready for note off
+
+        switch (pot2state)
+        {
+          case 0:
+            pitch = transposearray[chordselect][x] + 24 + transpose;
+            MIDIchannel = MIDIchannel1;
+            break;
+          case 1:
+            pitch = transposearray[chordselect][x] + 24 + transpose;
+            MIDIchannel = MIDIchannel2;
+            break;
+          case 2:
+            pitch = transposearray[chordselect][x] + 24 + transpose;
+            MIDIchannel = MIDIchannel3;
+            break;
+          case 3:
+            pitch = transposearray[chordselect][x] + 24 + transpose;
+            MIDIchannel = MIDIchannel4;
+            break;
+          case 4:
+            pitch = transposearray[chordselect][x] + 24 + transpose;
+            MIDIchannel = MIDIchannel4;
+            break;
+          case 5:
+            pitch = transposearray[chordselect][x] + 24 + transpose;
+            MIDIchannel = MIDIchannel4;
+            break;
+          case 6:
+            pitch = transposearray[chordselect][x] + 24 + transpose;
+            MIDIchannel = MIDIchannel4;
+            break;
+        }
+
+        switch (pot3state)//change these values to change transposition from C major
+        {
+          case 0:
+            transpose = 0;
+            break;
+          case 1:
+            transpose = 1;
+            break;
+          case 2:
+            transpose = 2;
+            break;
+          case 3:
+            transpose = 3;
+            break;
+          case 4:
+            transpose = 4;
+            break;
+          case 5:
+            transpose = 5;
+            break;
+          case 6:
+            transpose = 6;
+            break;
+        }
+
+
+        lastpitch[x] = pitch;
+        usbMIDI.sendNoteOn(pitch, notevolume, MIDIchannel);
+        MIDI.sendNoteOn(pitch, notevolume, MIDIchannel);
+      }
+    }
+
+    //pad released **************************************************
+    for (int x = 0; x < 9; x++)
+    {
+      //no touch, MIDI sent, played for min duration 10us
+      if ((padactive[x] == LOW) && (padstate[x] == 3)) //need reset
+      {
+        padstate[x] = 4;
+      }
+    }
+
+    //normal turn off notes after time out **************************************************
+    for (int x = 0; x < 9; x++)
+    {
+      //no touch, MIDI sent, played for min duration 10us
+      if ((padstate[x] == 4) ) //need reset
+      {
+        padstate[x] = 0;
+        usbMIDI.sendNoteOff(lastpitch[x], notevolume, MIDIchannel);
+        MIDI.sendNoteOff(lastpitch[x], notevolume, MIDIchannel);
+      }
+    }
+  }
+  //************************************
+  //**  Dual Board  End               **
+  //************************************
+
+
+
+  //************************************
+  //************************************
+  //**  Euclid Sequencer Module       **
+  //************************************
+  //************************************
+
+  /*This module generates a Euclid pattern having a length entered
+     after first pressing the arm button (to blue) and tapping any other key
+     and then pressing arm button (to green)and tapping a number of beats for that
+     drum (and then the arm button)for each of three drums.
+     Ends with a melody keyboard.
+     http://cgm.cs.mcgill.ca/~godfried/publications/banff.pdf
+  */
+
+  if (pot1state == 4)
+  {
+    if (laststate != pot1state)
+    {
+      laststate = pot1state;
+      Serial.println("euclid");
+      //delay(300);
+      //reset everything
+      loopindex = 0;
+      MIDIchannel = MIDIchannel0;
+      for (int s = 0; s < 24; s++)
+      {
+        drumcartridge1[s] = 0;
+        drumcartridge2[s] = 0;
+        drumcartridge3[s] = 0;
+        drumcartridge4[s] = 0;
+      }
+      havedata1 = 0;
+      havedata2 = 0;
+      havedata3 = 0;
+      havedata4 = 0;
+      note1select = 0;
+      note2select = 0;
+      note3select = 0;
+      note4select = 0;
+      bincounter = 0;
+    }
+    byte MIDIchannel=0;
+
+
+    //*** main loop clock  **************
+    if (millis() > drumloopstarttime + euclidtempo)
+    {
+      int temp1 = analogRead(pot3pin);
+      euclidtempo = map(temp1, 0, 1024, 50, 200);
+      drumloopstarttime = millis();
+      ticktock = !ticktock;
+      if (ticktock == true)
+      {
+        loopindex++;
+        if (loopindex > bincounter - 1) loopindex = 0;
+
+        byte beatvol = 40;
+        if (loopindex == bincounter / 2) beatvol = 50;
+        if (loopindex == 0) beatvol = 70;
+
+        if ((havedata1 == true) && (drumcartridge1[loopindex] == 1))
+        {
+          usbMIDI.sendNoteOn(realdrum[note1select], beatvol, MIDIchannel0);
+          MIDI.sendNoteOn(realdrum[note1select], beatvol, MIDIchannel0);
+        }
+
+        if ((havedata2 == true) && (drumcartridge2[loopindex] == 1))
+        {
+          usbMIDI.sendNoteOn(realdrum[note2select], beatvol, MIDIchannel0);//
+          MIDI.sendNoteOn(realdrum[note2select], beatvol, MIDIchannel0);//
+        }
+
+        if ((havedata3 == true) && (drumcartridge3[loopindex] == 1))
+        {
+          usbMIDI.sendNoteOn(realdrum[note3select], beatvol, MIDIchannel0);
+          MIDI.sendNoteOn(realdrum[note3select], beatvol, MIDIchannel0);
+        }
+      }
+      else
+      {
+        usbMIDI.sendNoteOn(realdrum[note1select], 0, MIDIchannel0);//todo more sophiticated note off handling
+        usbMIDI.sendNoteOn(realdrum[note2select], 0, MIDIchannel0);
+        usbMIDI.sendNoteOn(realdrum[note3select], 0, MIDIchannel0);
+        MIDI.sendNoteOn(realdrum[note1select], 0, MIDIchannel0);//todo more sophiticated note off handling
+        MIDI.sendNoteOn(realdrum[note2select], 0, MIDIchannel0);
+        MIDI.sendNoteOn(realdrum[note3select], 0, MIDIchannel0);
+      }
+    }
+
+    for (int x = 0; x < 9; x++)
+    {
+      if (padstate[x] == 2)//new "on" note
+      {
+
+        //*** state change logic **************
+        if ((x == 5) && (bouncemillis + 200 < millis())) //detect loop trigger button to advance states
+        {
+          bouncemillis = millis();
+          state_change_trigger = true; //center lower button is loop control
+          Serial.println("state change");
+          padstate[x] = 3;
+        }
+
+        //first loop begin  enter buckets (# of bins or spots for beats)****
+        if ((loopstate == 0) && (state_change_trigger == true)) //arm1
+        {
+          state_change_trigger = false;
+          loopstate = 1;
+          Serial.println("arm1 @ 1");
+          Bledinput = 3; //analogWrite(Bled, 100);
+          MIDIchannel = MIDIchannel0;
+        }
+
+        //second loop begin--buckets done***********************
+        if ((loopstate == 1) && (state_change_trigger == true)) //play1
+        {
+          state_change_trigger = false;
+          loopstate = 2;
+          Serial.println("play1 @2");
+          Bledinput = 0; //analogWrite(Bled, 256);
+        }
+
+        //third loop begin--enter first beats***********************
+        if ((loopstate == 2) && (state_change_trigger == true)) //arm 2
+        {
+          state_change_trigger = false;
+          loopstate = 3;
+          Gledinput = 3; //analogWrite(Gled, 100);
+        }
+
+        //fourth loop begin--first beats done***********************
+        if ((loopstate == 3) && (state_change_trigger == true)) //move to play mode for drums
+        {
+          state_change_trigger = false;
+          loopstate = 4;
+          Gledinput = 0; //Gledinput=0;//analogWrite(Gled,256);
+          EuclidGenerator( bincounter, beatcounter, 0, 0);
+          for (int x = 0; x < bincounter; x++)drumcartridge1[x] = drumcartridge[x];
+          havedata1 = true;
+          beatcounter = 0;
+          note2select = currentnote;
+        }
+
+        //fifth loop begin--enter second beats***********************
+        if ((loopstate == 4) && (state_change_trigger == true)) //move to armed mode for drums
+        {
+          state_change_trigger = false;
+          loopstate = 5;
+          Gledinput = 3; //analogWrite(Gled, 100);
+        }
+
+        //sixth loop begin--second beats done***********************
+        if ((loopstate == 5) && (state_change_trigger == true)) //move to play mode for drums
+        {
+          state_change_trigger = false;
+          loopstate = 6;
+          Gledinput = 0; //Gledinput=0;//analogWrite(Gled,256);
+          EuclidGenerator( bincounter, beatcounter, 0, 0);
+          for (int x = 0; x < bincounter; x++)drumcartridge2[x] = drumcartridge[x];
+          havedata2 = true;
+          beatcounter = 0;
+          note3select = currentnote;
+        }
+
+        //seventh loop begin--enter third beats***********************
+        if ((loopstate == 6) && (state_change_trigger == true)) //move to armed mode for drums
+        {
+          state_change_trigger = false;
+          loopstate = 7;
+          Gledinput = 3; //analogWrite(Gled, 100);
+        }
+
+        //eighth loop begin--third beats done***********************
+        if ((loopstate == 7) && (state_change_trigger == true)) //move to armed mode for drums
+        {
+          loopstate = 8;
+          state_change_trigger = false;
+          Gledinput = 0; //analogWrite(Gled,256);
+          EuclidGenerator( bincounter, beatcounter, 0, 0);
+          for (int x = 0; x < bincounter; x++)drumcartridge3[x] = drumcartridge[x];
+          havedata3 = true;
+          beatcounter = 0;
+          note4select = currentnote;
+        }
+
+        //seventh loop begin--enter third beats***********************
+        if ((loopstate == 8) && (state_change_trigger == true)) //move to armed mode for drums
+        {
+          state_change_trigger = false;
+          loopstate = 0;
+          for (int s = 0; s < 24; s++)
+          {
+            drumcartridge1[s] = 0;
+            drumcartridge2[s] = 0;
+            drumcartridge3[s] = 0;
+            drumcartridge4[s] = 0;
+          }
+          havedata1 = 0;
+          havedata2 = 0;
+          havedata3 = 0;
+          havedata4 = 0;
+          note1select = 0;
+          note2select = 0;
+          note3select = 0;
+          note4select = 0;
+          bincounter = 0;
+          beatcounter = 0;
+        }
+
+
+        //end of loop logic ************************
+
+        //***  real-time note player  **************
+        pitch = realdrum[x];
+        MIDIchannel = MIDIchannel0;
+        if (loopstate == 8)
+        {
+          switch (pot2state)//change these values to change channels and key mappings
+          {
+            case 0:
+              pitch = hangdrum[x] - 12;
+              MIDIchannel = MIDIchannel1;
+              break;
+            case 1:
+              pitch = hangdrum[x] - 12;
+              MIDIchannel = MIDIchannel2;
+              break;
+            case 2:
+              pitch = hangdrum[x];
+              MIDIchannel = MIDIchannel3;
+              break;
+            case 3:
+              pitch = Cmaj[x];
+              MIDIchannel = MIDIchannel4;
+              break;
+            case 4:
+              pitch = Cmin[x];
+              MIDIchannel = MIDIchannel4;
+              break;
+            case 5:
+              pitch = realdrum[x];
+              MIDIchannel = MIDIchannel0;
+              break;
+            case 6:
+              pitch = akebono[x];
+              MIDIchannel = MIDIchannel4;
+              break;
+          }
+
+        }
+        currentnote = pitch;
+        notevolume = padvolume[x];
+        padstate[x] = 3; //3 is ready for note off
+        if (x != 5)
+        {
+          usbMIDI.sendNoteOn(pitch, notevolume, MIDIchannel);
+          MIDI.sendNoteOn(pitch, notevolume, MIDIchannel);
+          if ((loopstate == 1) && (bouncemillis + 200 < millis()))
+          {
+            bouncemillis = millis();
+            bincounter++;
+          }
+          if ((loopstate ==  3) && (bouncemillis + 200 < millis()))
+          {
+            bouncemillis = millis();
+            beatcounter++;
+            note1select = x;
+          }
+
+          if ((loopstate == 5) && (bouncemillis + 200 < millis()))
+          {
+            bouncemillis = millis();
+            beatcounter++;
+            note2select = x;
+          }
+
+          if ((loopstate == 7) && (bouncemillis + 200 < millis()))
+          {
+            bouncemillis = millis();
+            beatcounter++;
+            note3select = x;
+          }
+        }
+      }
+    }
+
+    //*** NEW OFF NOTES **************
+    for (int x = 0; x < 9; x++)// state for interruption
+    {
+      //no touch, MIDI sent, played for min duration 10us
+      if ((padactive[x] == LOW) && (padstate[x] == 3)) //need reset
+      {
+        padstate[x] = 4;
+      }
+    }
+
+    for (int x = 0; x < 9; x++)
+    {
+      if (padstate[x] == 4) //found an off pad
+      {
+        //***  LIVE NOTE-OFF PLAYER            **************
+
+        padstate[x] = 0; // 0 is reset for new touch
+        if (x != 5)
+        {
+          usbMIDI.sendNoteOff(pitch, 0, MIDIchannel);
+          MIDI.sendNoteOff(pitch, 0, MIDIchannel);
+        }
+      }
+    }
+  }
+
+  //************************************
+  //**  end euclid synth             **
+  //************************************
+
+  //************************************
+  //************************************
+  //**  BLANK MODULE                 **
+  //************************************
+  //************************************
+  /*
+   to be determined   
+  */
+
+
+  if (pot1state == 6) //This module will be activated when the mode control pot is violet
+  {
+    if (laststate != pot1state)
+    {
+      //put your mode initialization code here
+      Serial.println("blank module");
+    }
+
+    switch (pot2state) //read the 2nd and 3rd pots using a switch statement like this:        {
+    {
+      case 0:
+        //set some variable
+        break;
+      case 1:
+        //etc
+        break;
+    }
+
+    //react to pad presses using these states: pad touched=2, ready to play=3; pad release=4; pad ready for new touch=0
+
+    //pad touched **************************************************
+    for (int x = 0; x < 9; x++) //check each pad for a touch
+    {
+      if (padstate[x] == 2)
+      {
+        notevolume = padvolume[x]; 
+        padstate[x] = 3; //3 is ready for note off
+        pitch=60; //need to map pad to pitches somehow
+        MIDIchannel=2;
+        usbMIDI.sendNoteOn(pitch, notevolume, MIDIchannel); //send a note (you need to figure out the pitch, channel etc
+        MIDI.sendNoteOn(pitch, notevolume, MIDIchannel); //send a note (you need to figure out the pitch, channel etc
+        lastpitch[x] = pitch;
+      }
+    }
+
+
+    //pad released **************************************************
+    for (int x = 0; x < 9; x++)
+    {
+      //no touch,
+      if ((padactive[x] == LOW) && (padstate[x] == 3)) //need reset
+      {
+        padstate[x] = 4;
+      }
+    }
+
+    //normal turn off notes after time out **************************************************
+    for (int x = 0; x < 9; x++)
+    {
+      //no touch, MIDI sent, played for min duration 10us
+      if ((padstate[x] == 4) ) //need reset
+      {
+        padstate[x] = 0;
+        usbMIDI.sendNoteOff(lastpitch[x], notevolume, MIDIchannel);
+       MIDI.sendNoteOff(lastpitch[x], notevolume, MIDIchannel);
+      }
+    }
+  }
+  //************************************
+  //**  end newmodule            **
+  //************************************
+
+
+
+  if ((turnofftoggle == true) && (turnofftime + 50 < millis()))
+  {
+    turnofftoggle = false;
+    Rledinput = 0;
+    if (armed == true)Gledinput = 4; //analogWrite(Gled, 50);
+  }
+
+
+  if ((deadtime + 10000 < millis()) && (blinkrate + 5000 < millis()))
+  {
+    Rledinput = 4;
+    Rledtimeout = millis() + 1;
+    blinkrate = millis();
+  }
+
+
+  //************************************
+  //**       Pot Read Routine         **
+  //************************************
+
+  if ((potreadtime + 100) < millis())
+  {
+    potreadtime  = millis();
+
+    //pot 1
+    pot1read = (analogRead(pot1pin));
+    if (abs(pot1read - lastpot1read) > 5)
+    {
+      lightsout = true;
+      lightsouttime = millis();
+      lastpot1read = pot1read;
+
+      if ((pot1read >= 0) && (pot1read < 125))
+      {
+        pot1state = 0;
+        if (lastpot1state != pot1state)//red
+        {
+          fastoff = true;
+          Rledinput = 4;
+          Bledinput = 0;
+          Gledinput = 0;
+          for (int z = 20; z < 90; z++)
+          {
+            usbMIDI.sendNoteOff(z,  0, MIDIchannel0); //turn off
+            MIDI.sendNoteOff(z,  0, MIDIchannel0); //turn off
+          }
+          for (int z = 20; z < 90; z++)
+          {
+            usbMIDI.sendNoteOff(z,  0, MIDIchannel1); //turn off
+            MIDI.sendNoteOff(z,  0, MIDIchannel1); //turn off
+          }
+          for (int z = 20; z < 90; z++)
+          {
+            usbMIDI.sendNoteOff(z,  0, MIDIchannel2); //turn off
+            MIDI.sendNoteOff(z,  0, MIDIchannel2); //turn off
+          }
+          for (int z = 20; z < 90; z++)
+          {
+            usbMIDI.sendNoteOff(z,  0, MIDIchannel3); //turn off
+           MIDI.sendNoteOff(z,  0, MIDIchannel3); //turn off
+          }
+          lastpot1state = pot1state;
+        }
+      }
+
+      else if ((pot1read >= 169) && (pot1read < 269)) //orange
+      {
+        pot1state = 1;
+        if (lastpot1state != pot1state)
+        {
+          fastoff = true;
+          Rledinput = 4;
+          Bledinput = 0;
+          Gledinput = 2;
+          for (int z = 20; z < 90; z++)
+          {
+            usbMIDI.sendNoteOff(z,  0, MIDIchannel0); //turn off
+            MIDI.sendNoteOff(z,  0, MIDIchannel0); //turn off
+          }
+          for (int z = 20; z < 90; z++)
+          {
+            usbMIDI.sendNoteOff(z,  0, MIDIchannel1); //turn off
+            MIDI.sendNoteOff(z,  0, MIDIchannel1); //turn off
+          }
+          for (int z = 20; z < 90; z++)
+          {
+            usbMIDI.sendNoteOff(z,  0, MIDIchannel2); //turn off
+             MIDI.sendNoteOff(z,  0, MIDIchannel2); //turn off
+          }
+          for (int z = 20; z < 90; z++)
+          {
+            usbMIDI.sendNoteOff(z,  0, MIDIchannel3); //turn off
+            MIDI.sendNoteOff(z,  0, MIDIchannel3); //turn off
+          }
+          lastpot1state = pot1state;
+        }
+      }
+      else if ((pot1read >= 315) && (pot1read < 415)) //yellow
+      {
+        pot1state = 2;
+        if (lastpot1state != pot1state)
+        {
+          fastoff = true;
+          Rledinput = 3;
+          Bledinput = 0;
+          Gledinput = 3;
+          for (int z = 20; z < 90; z++)
+          {
+            usbMIDI.sendNoteOff(z,  0, MIDIchannel0); //turn off
+            MIDI.sendNoteOff(z,  0, MIDIchannel0); //turn off
+          }
+          for (int z = 20; z < 90; z++)
+          {
+            usbMIDI.sendNoteOff(z,  0, MIDIchannel1); //turn off
+            MIDI.sendNoteOff(z,  0, MIDIchannel1); //turn off
+          }
+          for (int z = 20; z < 90; z++)
+          {
+            usbMIDI.sendNoteOff(z,  0, MIDIchannel2); //turn off
+            MIDI.sendNoteOff(z,  0, MIDIchannel2); //turn off
+          }
+          for (int z = 20; z < 90; z++)
+          {
+            usbMIDI.sendNoteOff(z,  0, MIDIchannel3); //turn off
+            MIDI.sendNoteOff(z,  0, MIDIchannel3); //turn off
+          }
+          lastpot1state = pot1state;
+        }
+      }
+      else if ((pot1read >= 461) && (pot1read < 561)) //green
+      {
+        pot1state = 3;
+        if (lastpot1state != pot1state)
+        {
+          fastoff = true;
+          Rledinput = 0;
+          Bledinput = 0;
+          Gledinput = 3;
+          for (int z = 20; z < 90; z++)
+          {
+            usbMIDI.sendNoteOff(z,  0, MIDIchannel0); //turn off
+            MIDI.sendNoteOff(z,  0, MIDIchannel0); //turn off
+          }
+          for (int z = 20; z < 90; z++)
+          {
+            usbMIDI.sendNoteOff(z,  0, MIDIchannel1); //turn off
+            MIDI.sendNoteOff(z,  0, MIDIchannel1); //turn off
+          }
+          for (int z = 20; z < 90; z++)
+          {
+            usbMIDI.sendNoteOff(z,  0, MIDIchannel2); //turn off
+            MIDI.sendNoteOff(z,  0, MIDIchannel2); //turn off
+          }
+          for (int z = 20; z < 90; z++)
+          {
+            usbMIDI.sendNoteOff(z,  0, MIDIchannel3); //turn off
+            MIDI.sendNoteOff(z,  0, MIDIchannel3); //turn off
+          }
+          lastpot1state = pot1state;
+        }
+      }
+      else if ((pot1read >= 607) && (pot1read < 707)) //blue
+      {
+        pot1state = 4;
+        if (lastpot1state != pot1state)
+        {
+          fastoff = true;
+          Rledinput = 0;
+          Bledinput = 4;
+          Gledinput = 2;
+          for (int z = 20; z < 90; z++)
+          {
+            usbMIDI.sendNoteOff(z,  0, MIDIchannel0); //turn off
+            MIDI.sendNoteOff(z,  0, MIDIchannel0); //turn off
+          }
+          for (int z = 20; z < 90; z++)
+          {
+            usbMIDI.sendNoteOff(z,  0, MIDIchannel1); //turn off
+            MIDI.sendNoteOff(z,  0, MIDIchannel1); //turn off
+          }
+          for (int z = 20; z < 90; z++)
+          {
+            usbMIDI.sendNoteOff(z,  0, MIDIchannel2); //turn off
+            MIDI.sendNoteOff(z,  0, MIDIchannel2); //turn off
+          }
+          for (int z = 20; z < 90; z++)
+          {
+            usbMIDI.sendNoteOff(z,  0, MIDIchannel3); //turn off
+            MIDI.sendNoteOff(z,  0, MIDIchannel3); //turn off
+          }
+          lastpot1state = pot1state;
+        }
+      }
+      else if ((pot1read >= 753) && (pot1read < 853) ) //indigo
+      {
+        pot1state = 5;
+        if (lastpot1state != pot1state)
+        {
+          fastoff = true;
+          Rledinput = 0;
+          Bledinput = 4;
+          Gledinput = 0;
+          for (int z = 20; z < 90; z++)
+          {
+            usbMIDI.sendNoteOff(z,  0, MIDIchannel0); //turn off
+            MIDI.sendNoteOff(z,  0, MIDIchannel0); //turn off
+          }
+          for (int z = 20; z < 90; z++)
+          {
+            usbMIDI.sendNoteOff(z,  0, MIDIchannel1); //turn off
+            MIDI.sendNoteOff(z,  0, MIDIchannel1); //turn off
+          }
+          for (int z = 20; z < 90; z++)
+          {
+            usbMIDI.sendNoteOff(z,  0, MIDIchannel2); //turn off
+            MIDI.sendNoteOff(z,  0, MIDIchannel2); //turn off
+          }
+          for (int z = 20; z < 90; z++)
+          {
+            usbMIDI.sendNoteOff(z,  0, MIDIchannel3); //turn off
+            MIDI.sendNoteOff(z,  0, MIDIchannel3); //turn off
+          }
+          lastpot1state = pot1state;
+        }
+      }
+
+      else if ((pot1read >= 899) && (pot1read < 1024) ) //violet
+      {
+        pot1state = 6;
+        if (lastpot1state != pot1state)
+        {
+          fastoff = true;
+          Rledinput = 2;
+          Bledinput = 4;
+          Gledinput = 0;
+          for (int z = 20; z < 90; z++)
+          {
+            usbMIDI.sendNoteOff(z,  0, MIDIchannel0); //turn off
+            MIDI.sendNoteOff(z,  0, MIDIchannel0); //turn off
+          }
+          for (int z = 20; z < 90; z++)
+          {
+            usbMIDI.sendNoteOff(z,  0, MIDIchannel1); //turn off
+            MIDI.sendNoteOff(z,  0, MIDIchannel1); //turn off
+          }
+          for (int z = 20; z < 90; z++)
+          {
+            usbMIDI.sendNoteOff(z,  0, MIDIchannel2); //turn off
+            MIDI.sendNoteOff(z,  0, MIDIchannel2); //turn off
+          }
+          for (int z = 20; z < 90; z++)
+          {
+            usbMIDI.sendNoteOff(z,  0, MIDIchannel3); //turn off
+            MIDI.sendNoteOff(z,  0, MIDIchannel3); //turn off
+          }
+          lastpot1state = pot1state;
+        }
+      }
+    }
+
+    //pot 2
+    pot2read = (analogRead(pot2pin));
+    if (abs(pot2read - lastpot2read) > 5)
+    {
+      lightsout = true;
+      lightsouttime = millis();
+      lastpot2read = pot2read;
+
+      if ((pot2read >= 0) && (pot2read < 125))
+      {
+        pot2state = 0;
+        if (lastpot2state != pot2state)//red
+        {
+          fastoff = true;
+          Rledinput = 4;
+          Bledinput = 0;
+          Gledinput = 0;
+          lastpot2state = pot2state;
+        }
+      }
+
+      else if ((pot2read >= 169) && (pot2read < 269)) //orange
+      {
+        pot2state = 1;
+        if (lastpot2state != pot2state)
+        {
+          fastoff = true;
+          Rledinput = 4;
+          Bledinput = 0;
+          Gledinput = 2;
+          lastpot2state = pot2state;
+        }
+      }
+      else if ((pot2read >= 315) && (pot2read < 415)) //yellow
+      {
+        pot2state = 2;
+        if (lastpot2state != pot2state)
+        {
+          fastoff = true;
+          Rledinput = 3;
+          Bledinput = 0;
+          Gledinput = 3;
+          lastpot2state = pot2state;
+        }
+      }
+      else if ((pot2read >= 461) && (pot2read < 561)) //green
+      {
+        pot2state = 3;
+        if (lastpot2state != pot2state)
+        {
+          fastoff = true;
+          Rledinput = 0;
+          Bledinput = 0;
+          Gledinput = 3;
+          lastpot2state = pot2state;
+        }
+      }
+      else if ((pot2read >= 607) && (pot2read < 707)) //blue
+      {
+        pot2state = 4;
+        if (lastpot2state != pot2state)
+        {
+          fastoff = true;
+          Rledinput = 0;
+          Bledinput = 4;
+          Gledinput = 2;
+          lastpot2state = pot2state;
+        }
+      }
+      else if ((pot2read >= 753) && (pot2read < 853) ) //indigo
+      {
+        pot2state = 5;
+        if (lastpot2state != pot2state)
+        {
+          fastoff = true;
+          Rledinput = 0;
+          Bledinput = 4;
+          Gledinput = 0;
+          lastpot2state = pot2state;
+        }
+      }
+
+      else if ((pot2read >= 899) && (pot2read < 1024) ) //violet
+      {
+        pot2state = 6;
+        if (lastpot2state != pot2state)
+        {
+          fastoff = true;
+          Rledinput = 2;
+          Bledinput = 4;
+          Gledinput = 0;
+          lastpot2state = pot2state;
+        }
+      }
+    }
+
+    //pot 3
+    pot3read = (analogRead(pot3pin));
+    if (abs(pot3read - lastpot3read) > 5)
+    {
+      lightsout = true;
+      lightsouttime = millis();
+      lastpot3read = pot3read;
+
+
+      if ((pot3read >= 0) && (pot3read < 125))
+      {
+        pot3state = 0;
+        if (lastpot3state != pot3state)//red
+        {
+          fastoff = true;
+          Rledinput = 4;
+          Bledinput = 0;
+          Gledinput = 0;
+          lastpot3state = pot3state;
+        }
+      }
+
+      else if ((pot3read >= 169) && (pot3read < 269)) //orange
+      {
+        pot3state = 1;
+        if (lastpot3state != pot3state)
+        {
+          fastoff = true;
+          Rledinput = 4;
+          Bledinput = 0;
+          Gledinput = 2;
+          lastpot3state = pot3state;
+        }
+      }
+      else if ((pot3read >= 315) && (pot3read < 415)) //yellow
+      {
+        pot3state = 2;
+        if (lastpot3state != pot3state)
+        {
+          fastoff = true;
+          Rledinput = 3;
+          Bledinput = 0;
+          Gledinput = 3;
+          lastpot3state = pot3state;
+        }
+      }
+      else if ((pot3read >= 461) && (pot3read < 561)) //green
+      {
+        pot3state = 3;
+        if (lastpot3state != pot3state)
+        {
+          fastoff = true;
+          Rledinput = 0;
+          Bledinput = 0;
+          Gledinput = 3;
+          lastpot3state = pot3state;
+        }
+      }
+      else if ((pot3read >= 607) && (pot3read < 707)) //blue
+      {
+        pot3state = 4;
+        if (lastpot3state != pot3state)
+        {
+          fastoff = true;
+          Rledinput = 0;
+          Bledinput = 4;
+          Gledinput = 2;
+          lastpot3state = pot3state;
+        }
+      }
+      else if ((pot3read >= 753) && (pot3read < 853) ) //indigo
+      {
+        pot3state = 5;
+        if (lastpot3state != pot3state)
+        {
+          fastoff = true;
+          Rledinput = 0;
+          Bledinput = 4;
+          Gledinput = 0;
+          lastpot3state = pot3state;
+        }
+      }
+
+      else if ((pot3read >= 899) && (pot3read < 1024) ) //violet
+      {
+        pot3state = 6;
+        if (lastpot3state != pot3state)
+        {
+          fastoff = true;
+          Rledinput = 2;
+          Bledinput = 4;
+          Gledinput = 0;
+          lastpot3state = pot3state;
+        }
+      }
+    }
+  }
+
+  if ((lightsout == true) && (lightsouttime + 1000 <  millis()))
+  {
+    lightsout = false;
+    Rledinput = 0;
+    Bledinput = 0;
+    Gledinput = 0;
+    lastpot1state = 99;
+    lastpot2state = 99;
+    lastpot3state = 99;
+  }
+
+  //************************************
+  //**    End of Pot Read Routine     **
+  //************************************
+
+
+  //************************************
+  //**    Calibration Routines        **
+  //************************************
+
+  //************************************
+  //**      Update acceleration      **
+  //************************************
+
+
+
+  circularaccbufferz[circbuffpointer] = myIMU.readFloatAccelZ();
+
+  if (circbuffpointer < 99) circbuffpointer++; //!!!set to 20 tops
+  else
+  {
+    circbuffpointer = 0; //accel. axis circular buffer pointer
+    if (hithappened == LOW) //if no hits in previous cycle use for calibration
+    {
+      acc_calibrationz = 0.0;
+      for (int x = 0; x < 20; x++)acc_calibrationz += circularaccbufferz[x];
+      acc_calibrationz = acc_calibrationz / 20;
+    }
+    hithappened = LOW;
+  }
+
+  //*******************************************************************************
+  // LED modulation
+  //*******************************************************************************
+
+
+  if (fastoff == true)
+  {
+    //fastoff = false; Serial.println("fastoff");
+    digitalWrite(Rled, HIGH);
+    digitalWrite(Gled, HIGH);
+    digitalWrite(Bled, HIGH);
+  }
+
+
+
+  //Rledinput=0;
+  //Bledinput=0;
+  //Gledinput=0;
+
+  partcounter++;
+  if (partcounter > 4) partcounter = 1;
+  if (Rledinput > partcounter) digitalWrite(Rled, LOW); else digitalWrite(Rled, HIGH);
+  if (Gledinput > partcounter) digitalWrite(Gled, LOW); else digitalWrite(Gled, HIGH);
+  if (Bledinput > partcounter) digitalWrite(Bled, LOW); else digitalWrite(Bled, HIGH);
+
+  if ((Rledtimeout != 0) && (Rledtimeout < millis()))
+  {
+    Rledinput = 0;
+    Rledtimeout = 0;
+  }
+
+  if ((Bledtimeout != 0) && (Bledtimeout < millis()))
+  {
+    Bledinput = 0;
+    Bledtimeout = 0;
+  }
+
+  if ((Gledtimeout != 0) && (Gledtimeout < millis()))
+  {
+    Gledinput = 0;
+    Gledtimeout = 0;
+  }
+
+
+}//end main loop
