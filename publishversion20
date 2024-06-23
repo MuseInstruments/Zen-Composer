@@ -1,0 +1,590 @@
+
+
+//************************************
+//************************************
+//**         Zen Composer           **
+//**           6/20/2022
+//**  compile for teensy 4.0
+//** keyboard/chordboard/workflow   **
+//**solo instrument/Euclid pattern  **
+//************************************
+//************************************
+
+// //***************************MIT Software License*******************************
+//Copyright (c) 2022 Keith Baxter (info@museelectronicinstruments.com)
+//
+//Permission is hereby granted, free of charge, to any person obtaining a copy
+//of this software and associated documentation files (the "Software"), to deal
+//in the Software without restriction, including without limitation the rights
+//to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+//copies of the Software, and to permit persons to whom the Software is
+//furnished to do so, subject to the following conditions:
+//
+//The above copyright notice and this permission notice shall be included in all
+//copies or substantial portions of the Software.
+//
+//THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+//IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+//FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+//AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+//LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+//OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+//SOFTWARE.
+
+//************************** End of MIT License*******************************
+
+//This license is not a hardware license nor an implied license to hardware.
+//Please support Muse Electronic Instruments (MEI) in its mission to offer
+//innovative electronic instruments by purchasing the Zen Flute, Zen composer and other MEI products.  Thanks.
+
+#include <Wire.h>
+#include "SparkFunLIS3DH.h" //to communicate with acelerometer
+LIS3DH myIMU(I2C_MODE, 0x18); //Default constructor is I2C, addr 0x19.
+#include <MIDI.h>
+MIDI_CREATE_INSTANCE(HardwareSerial, Serial3, MIDI);
+
+
+
+//************************************
+//************************************
+//**      Global Variables          **
+//************************************
+//************************************
+
+const int channel = 1;//MIDI channel
+
+//Debugging
+int debugmode;
+bool acc_plot = false;
+bool plotonce = false;
+//debug printout delay variable
+unsigned long next = 0;
+unsigned long profiletime = 0;
+unsigned long profiletimedelta = 0;
+float integrate = 0;
+
+//Teensy pin assignments
+const byte driverpin = 6; //common pad drive pin
+const byte Gled = 23; //tricolor LED pins
+const byte Bled = 22;
+const byte Rled = 21; //
+const byte pot1pin = A2;//20
+const byte pot2pin = A3;//17
+const byte pot3pin = A6;//16
+
+//for optional eurorack control
+const byte gate_pin = 13;
+const byte cv_pin = 12;
+const byte mod_pin = 15;
+
+/* pad layout
+    ---1-3-6----
+    -0-2-4-7-8-
+    -----5------
+    at times,
+    pad 5 = arm
+*/
+
+const byte pad0 = 2;
+const byte pad1 = 3;
+const byte pad2 = 4;
+const byte pad3 = 5;
+const byte pad4 = 7;
+const byte pad5 = 8;
+const byte pad6 = 9;
+const byte pad7 = 10;
+const byte pad8 = 11;
+
+//capacitive sensing variables
+boolean padactive[10];  //state of pad as touched (HIGH) or not (LOW)
+byte padstate[10];  //state of note as it is processed
+/*   0 = ready for new pad touch
+  //   1 = have touch, waiting for volume
+  //   2 = have volume, waiting to be played (note on)
+  //   3 = played
+  //   4 = released, waiting to be turned off (note off)
+*/
+unsigned long  padlasttime[10];  //last time pad was triggered
+byte padlastchannel[10];  //last channel held to turn right note off after key changes
+byte padlastnote[10];  //last note held to turn right note off after key change
+byte padvolume[10];  //current note volume
+byte pnum = 0; //index for pads through each loop
+
+//calibration
+float cap_calibration[10];  //calibration value for each pad
+float tempcap_calibration[10];
+int calstate=0;
+unsigned long cal_timer=0;
+float tempacc_calibrationz = 0;
+unsigned long totaltime;
+
+//capacitive sensing variables
+unsigned long chargetime[10];  //sensed charge time for each pad
+int overflowx = 0;
+unsigned long starttime = 0;
+unsigned long grabtime;
+int hysteresishigh = 25; //turn on threshold for touch//@@
+int hysteresislow = 10; //turn off threshold for touch
+unsigned long deadtime = 0;
+unsigned long blinkrate = 0;
+
+byte pad[10] = {
+  2, 3, 4, 5, 7, 8, 9, 10, 11, 11
+};
+
+//60 hz reject filter
+int lpf[11][11];
+int lpfindex[11];
+float integrate60 = 0;
+
+unsigned long bouncemillis=0;
+
+//potentiometer read variables
+unsigned long potreadtime = 0;
+bool lightsout = true;
+unsigned long lightsouttime = millis();
+int lastpot1read = 0;
+int pot1read = 0;
+int pot1state = 0;
+int lastpot1state = 0;
+int lastpot2read = 0;
+int pot2read = 0;
+int pot2state = 0;
+int lastpot2state = 0;
+int lastpot3read = 0;
+int pot3read = 0;
+int pot3state = 0;
+int lastpot3state = 0;
+int laststate = 0;
+int earlier3read = 0; //used for piano ptichbends
+
+//accelerometer variables
+float circularaccbufferz[100];
+int circbuffpointer = 0;
+float acc_calibrationz = 0;
+boolean hithappened = LOW;
+float motionenergy = 0;
+
+///RGB LED variables
+byte Rledinput = 0;
+byte Gledinput = 0;
+byte Bledinput = 0;
+unsigned long Rledtimeout = 0;
+unsigned long Bledtimeout = 0;
+unsigned long Gledtimeout = 0;
+int partcounter = 0;
+unsigned long RGBledtimer = 0;
+bool fastoff = true;
+
+
+//various piano scales--change these to change key mappings to notes in piano
+//https://computermusicresource.com/midikeys.html
+
+/*harmonic proximity
+    ---A-C-E----
+    -F-C-C-B-G-
+    -----D------
+ */  
+
+byte CmajS[10] = { 65, 69, 48, 60, 72, 74, 64, 71, 67, 00}; //C major
+byte Cmaj[10] = { 43, 48, 52, 55, 60, 64, 67, 72, 76, 79}; //C major
+byte Cmin[10] = { 43, 48, 51, 55, 60, 63, 67, 72, 75, 79}; //C minor
+byte scalesetC[10] = {57, 60, 62, 64, 65, 67, 69, 72, 74, 74}; //A minor
+byte pentatonicC[10] = {58, 60, 63, 65, 67, 70, 72, 75, 77, 79}; //
+byte bluesC[10] = {57, 60, 62, 63, 64, 67, 69, 72, 74, 75}; //blues
+byte harmonicminorC[10] = {56, 59, 61, 62, 63, 65, 67, 68, 71, 72};
+byte hangdrum[10] = {67, 71, 74, 78, 84, 78, 76, 72, 60, 67}; //blues
+byte realdrum[10] = {36, 37, 38, 39, 40, 41, 42, 43, 44, 45}; //ableton drum range
+byte akebono[10] = {48, 50, 51, 55, 57, 60, 62, 63, 67, 69}; //japanese
+
+
+//chord notes for transposition--used for tracking keyboard to recorded chords in workflow and for
+//dual board mode
+byte transposearray[10][10] = {
+  {10, 14, 17, 22, 26, 29, 34, 38, 41, 46},//Bb
+  {17, 21, 24, 29, 33, 36, 41, 45, 48, 53},//F
+  {14, 17, 21, 26, 29, 33, 38, 41, 45, 50},//Dm
+  {12, 16, 19, 24, 28, 31, 36, 40, 43, 48},//C
+  {16, 19, 23, 28, 31, 35, 40, 43, 47, 52},//Em
+  {24, 28, 31, 36, 40, 43, 48, 52, 55, 60},//C
+  {19, 23, 26, 31, 35, 38, 43, 47, 50, 55},//G
+  {21, 24, 28, 33, 36, 40, 45, 48, 52, 57},//Am
+  {14, 18, 21, 26, 30, 33, 38, 42, 45, 50},//D
+  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+};
+
+byte currentchordnote = 3; //move to workflow
+
+//chord mappings
+/*
+   mapping of pads to chords in chord modes
+*/
+
+bool microtonal = false;
+
+/*
+   standard chords arranged in circle of fifths
+*/
+byte circleFive[10][3] = {
+  {59, 62, 66},//bb
+  {53, 57, 60},//fmaj IV
+  {50, 53, 57},//dmin ii
+  {60, 64, 67},//cmaj I
+  {52, 55, 59},//emin iii
+  {72, 76, 79},//c maj +
+  {55, 59, 62},//gmaj V
+  {57, 61, 64},//amin iv
+  {50, 54, 57}, //d maj
+  {0, 0, 0},
+};
+
+byte popvariations[10][3] = {
+  {72, 69, 67},//c 6
+  {53, 57, 60},//fmaj IV
+  {65, 57, 60},//fmaj inv
+  {60, 64, 67},//cmaj I
+  {72, 64, 67},//c maj inv
+  {72, 69, 67},//c 6
+  {55, 59, 62},//gmaj V
+  {67, 59, 62}, //g maj inv
+  {69, 61, 64},//a min inv
+  {57, 61, 64},//amin iv
+};
+
+/*
+   i, iv and v in micotonal versions
+*/
+byte microT[10][3] = {
+  {59, 62, 66},//bb
+  {53, 57, 60},//fmaj IV
+  {53, 57, 60},//fmaj IV micro
+  {60, 64, 67},//cmaj I
+  {60, 64, 67},//cmaj I micro
+  {72, 76, 79},//c maj +
+  {55, 59, 62},//gmaj V
+  {55, 59, 62},//gmaj V micro
+  {50, 54, 57}, //d maj
+  {0, 0, 0},
+};
+//to do: add more
+
+//MIDI variables
+byte notevolume = 0;
+byte pitch = 0;
+byte lastpitch[10];
+
+//general variables
+byte pitch0 = 0;
+byte pitch1 = 0;
+byte pitch2 = 0;
+
+byte lastchordindex = 0;
+byte lastpitch0[10];
+byte lastpitch1[10];
+byte lastpitch2[10];
+
+
+//MIDI channels
+byte MIDIchannel = 1; //dummy channel
+byte MIDIchannel0 = 1;//MIDI channels
+byte MIDIchannel1 = 2;
+byte MIDIchannel2 = 3;
+byte MIDIchannel3 = 4;
+byte MIDIchannel4 = 5;
+byte MIDIchannel5 = 6;
+
+
+//keyboard variables *******************
+byte transpose = 0;
+
+//workflow variables ********************
+bool state_change_trigger = false;
+float loopstate = 0;
+//loop1
+unsigned long looptime[100];
+byte loopnote[100];
+byte loopvolume[100];
+byte loopMIDI = 0;
+unsigned long loopstarttime = 0;
+int loopindex = 0;
+int loopend = 0;
+//loop2
+unsigned long looptime2[100];
+byte loopnote2[100];
+byte loopvolume2[100];
+byte loopMIDI2 = 0;
+unsigned long loopstarttime2 = 0;
+int loopindex2 = 0;
+int loopend2 = 0;
+//loop3
+unsigned long looptime3[1000];
+byte loopnote3[1000];
+byte loopvolume3[1000];
+byte loopMIDI3 = 0;
+unsigned long loopstarttime3 = 0;
+int loopindex3 = 0;
+int loopend3 = 0;
+unsigned long loopsynchtime2 = 0;
+unsigned long loopsynchtime3 = 0;
+bool waittoggle1 = false;
+bool waittoggle2 = false;
+bool rollover1 = true;
+bool rollover2 = true;
+bool havedata1 = false;
+bool havedata2 = false;
+bool havedata3 = false;
+bool havedata4 = false;
+byte chordcapture[10];
+
+//LED timing variables
+unsigned long turnofftime = 0;
+bool turnofftoggle = false;
+bool armed = false;
+
+
+// Euclid Rhythm Variables
+bool euclid[50]; //output of euclid function then transfered to below arrays
+int tempo = 0;
+int drumcartridge[24];
+int drumcartridge1[24];
+int drumcartridge2[24];
+int drumcartridge3[24];
+int drumcartridge4[24];
+
+byte note1select = 0;
+byte note2select = 0;
+byte note3select = 0;
+byte note4select = 0;
+byte currentnote = 0;
+
+byte bincounter = 0;
+byte beatcounter = 0;
+bool ticktock = false;
+long euclidtempo = 125;
+long drumloopstarttime = 0; // millis
+
+
+//dual board variables
+
+byte chordselect = 0;
+
+
+//echo
+int quant = 1;
+
+long echo1time[50];
+long echo1note[50];
+long echo1vol[50];
+int echo1clk = 0;
+int echoplayindex1 = 0;
+
+long echo2time[50];
+long echo2note[50];
+long echo2vol[50];
+int echo2clk = 0;
+int echoplayindex2 = 0;
+
+long echo3time[50];
+long echo3note[50];
+long echo3vol[50];
+int echo3clk = 0;
+int echoplayindex3 = 0;
+
+int temphold=0;
+unsigned long timedelay=0;
+float tempofactor = 1;
+float lasttempofactor = 1;
+
+/// chord player
+
+int filigree=12; //randomizer on
+int patternseam=8; //controls where the chords can shift in 16 beat frame
+
+byte chordpatternlength;
+byte chordpattern0[2][20];
+byte chordpattern1[2][20];
+byte chordpattern2[2][20];
+byte chordpattern3[2][20];
+byte chordpattern4[2][20];
+byte chordpattern5[2][20];
+byte chordpattern6[2][20];
+byte chordpattern7[2][20];
+byte chordpattern8[2][20];
+
+
+//*************************************CHORD PATTERN A ***********************
+//stab
+byte patternseamA=4;
+byte chordpatternAlength = 2;
+byte chordpatternA0[2][20] = {//Bbmaj
+  {34, 58, 62, 65, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+  { 0,  0,  0,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 16}
+};
+
+byte   chordpatternA3[2][20] = { //Cmaj
+  {24, 55, 60, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+  { 0,  0,  0,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 16}
+};
+
+byte   chordpatternA1[2][20] = { //Fmaj
+  {29, 57, 60, 65, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+  { 0,  0,  0,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 16}
+};
+
+byte   chordpatternA6[2][20] = { //Gmaj
+  {31, 55, 59, 62, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+ { 0,  0,  0,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 16}
+};
+
+byte   chordpatternA8[2][20] = { //Dmaj
+ {26, 57, 62, 66, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+  { 0,  0,  0,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 16}
+};
+
+byte   chordpatternA4[2][20] = { //Amin
+  {33, 57, 60, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+  { 0,  0,  0,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 16}
+};
+
+byte   chordpatternA2[2][20] = { //Dmin
+ {26, 57, 62, 65, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+  { 0,  0,  0,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 16}
+};
+
+byte   chordpatternA7[2][20] = { //Emin
+ {28, 55, 59, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+ { 0,  0,  0,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 16}
+};
+
+byte   chordpatternA5[2][20] = {//Emaj
+ {28, 56, 59, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+  { 0,  0,  0,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 16}
+};
+
+//*************************************CHORD PATTERN B ***********************
+byte patternseamB=4;
+byte chordpatternBlength = 7;
+byte   chordpatternB0[2][20] = {//Bbmaj
+  {53 ,46, 53, 58, 60, 58, 62, 65, 60, 58, 53, 46, 53, 58, 60, 58, 62, 65, 53, 00,},
+  { 0,  2,  3,  4,  5,  5,  5,  6,  7,  8,  9,  10, 11, 12, 13, 13, 13, 14,  0,  0}
+};
+
+byte   chordpatternB3[2][20] = { //Cmaj
+  {43, 36, 43, 48, 50, 52, 55, 60, 64, 50, 48, 43, 36, 43, 48, 50, 52, 55, 60, 64, },
+ { 0,  2,  3,  4,  5,  5,  5,  6,  7,  8,  9,  10, 11, 12, 13, 13, 13, 14,  0,  0}
+};
+
+byte   chordpatternB1[2][20] = { //Fmaj
+  {48, 41, 48, 53, 55, 57, 60, 65, 55, 53, 48, 41, 48, 53, 55, 57, 60, 65, 48, },
+  { 0,  2,  3,  4,  5,  5,  5,  6,  7,  8,  9,  10, 11, 12, 13, 13, 13, 14,  0,  0}
+};
+
+byte   chordpatternB6[2][20] = { //Gmaj
+  {50, 43, 50, 55, 57, 55, 59, 62, 57, 55, 50, 43, 50, 55, 57, 55, 59, 62, 50,  0,  },
+  { 0,  2,  3,  4,  5,  5,  5,  6,  7,  8,  9,  10, 11, 12, 13, 13, 13, 14,  0,  0}
+};
+
+byte   chordpatternB8[2][20] = { //Dmaj
+  {45, 38, 45, 50, 52, 54, 57, 62, 66, 52, 50, 45, 38, 45, 50, 52, 54, 57, 62, 66,},
+  { 0,  2,  3,  4,  5,  5,  5,  6,  7,  8,  9,  10, 11, 12, 13, 13, 13, 14,  0,  0}
+};
+
+byte   chordpatternB4[2][20] = { //Bmin
+  {52, 45, 52, 57, 59, 57, 60, 64, 59, 57, 52, 45, 52, 57, 59, 57, 60, 64, 52,  0, },
+ { 0,  2,  3,  4,  5,  5,  5,  6,  7,  8,  9,  10, 11, 12, 13, 13, 13, 14,  0,  0}
+};
+
+byte   chordpatternB2[2][20] = { //Dmin
+  {45, 38, 45, 50, 52, 53, 57, 62, 65, 52, 50, 45, 38, 45, 50, 52, 53, 57, 62, 65, },
+  { 0,  2,  3,  4,  5,  5,  5,  6,  7,  8,  9,  10, 11, 12, 13, 13, 13, 14,  0,  0}
+};
+
+byte   chordpatternB7[2][20] = { //Emin
+  {47, 40, 47, 52, 53, 55, 59, 64, 53, 52, 47, 40, 47, 52, 53, 55, 59, 64, 47, 0},
+  { 0,  2,  3,  4,  5,  5,  5,  6,  7,  8,  9,  10, 11, 12, 13, 13, 13, 14,  0,  0}
+};
+
+byte   chordpatternB5[2][20] = {//Emaj
+  {47, 40, 47, 52, 53, 55, 59, 64, 53, 52, 47, 40, 47, 52, 53, 55, 59, 64, 47, 0},
+  { 0,  2,  3,  4,  5,  5,  5,  6,  7,  8,  9,  10, 11, 12, 13, 13, 13, 14,  0,  0}
+};
+
+
+//*************************************CHORD PATTERN C ***********************
+byte patternseamC=4;
+byte chordpatternClength = 15;
+
+byte chordpatternC0[2][20] = {//Bbmaj
+  {46, 53, 58, 60, 58, 62, 65, 60, 58, 53, 46, 53, 58, 60, 58, 62, 65, 53, 00, 00},
+  { 0,  1,  2,  3,  4,  4,  4,  5,  6,  7,  8,  9, 10, 11, 12, 12, 12, 14,  0,  0}
+};
+
+byte   chordpatternC3[2][20] = { //Cmaj
+  {36, 43, 48, 50, 52, 55, 60, 64, 50, 48, 43, 36, 43, 48, 50, 52, 55, 60, 64, 43},
+  { 0,  1,  2,  3,  4,  4,  4,  4,  5,  6,  7,  8,  9,  10, 11, 12, 12, 12, 12, 14}
+};
+
+byte   chordpatternC1[2][20] = { //Fmaj
+  {41, 48, 53, 55, 57, 60, 65, 55, 53, 48, 41, 48, 53, 55, 57, 60, 65, 48, 0},
+  { 0,  1,  2,  3,  4,  4,  4,  5,  6,  7,  8,  9, 10, 11, 12, 12, 12, 14,  0}
+};
+
+byte   chordpatternC6[2][20] = { //Gmaj
+  {43, 50, 55, 57, 55, 59, 62, 57, 55, 50, 43, 50, 55, 57, 55, 59, 62, 50,  0,  0},
+  {0,  1,  2,  3,  4,  4,  4,  5,  6,  7,  8,  9, 10, 11, 12, 12, 12, 14,  0,  0}
+};
+
+byte   chordpatternC8[2][20] = { //Dmaj
+  {38, 45, 50, 52, 54, 57, 62, 66, 52, 50, 45, 38, 45, 50, 52, 54, 57, 62, 66, 45},
+  { 0,  1,  2,  3,  4,  4,  4,  4,  5,  6,  7,  8,  9,  10, 11, 12, 12, 12, 12, 14}
+};
+
+byte   chordpatternC4[2][20] = { //Bmin
+  {45, 52, 57, 59, 57, 60, 64, 59, 57, 52, 45, 52, 57, 59, 57, 60, 64, 52,  0,  0},
+  { 0,  1,  2,  3,  4,  4,  4,  5,  6,  7,  8,  9, 10, 11, 12, 12, 12, 14,  0,  0}
+};
+
+byte   chordpatternC2[2][20] = { //Dmin
+  {38, 45, 50, 52, 53, 57, 62, 65, 52, 50, 45, 38, 45, 50, 52, 53, 57, 62, 65, 45},
+  { 0,  1,  2,  3,  4,  4,  4,  4,  5,  6,  7,  8,  9,  10, 11, 12, 12, 12, 12, 14}
+};
+
+byte   chordpatternC7[2][20] = { //Emin
+  {40, 47, 52, 53, 55, 59, 64, 53, 52, 47, 40, 47, 52, 53, 55, 59, 64, 47, 0, 0},
+  { 0,  1,  2,  3,  4,  4,  4,  5,  6,  7,  8,  9,  10, 11, 12, 12, 12, 14, 0, 0}
+};
+
+byte   chordpatternC5[2][20] = {//Emaj
+  {40, 47, 52, 53, 55, 59, 64, 53, 52, 47, 40, 47, 52, 53, 55, 59, 64, 47, 0, 0},
+  { 0,  1,  2,  3,  4,  4,  4,  5,  6,  7,  8,  9, 10, 11, 12, 12, 12, 14, 0, 0}
+};
+
+
+byte lastchordstate = 99;
+
+unsigned long sliptime = 0;
+int chordpadselect = 1;
+int chordpadprime = 1;
+int livehit = 99;
+int padhistory[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+int stackindex = 0;
+int notestack[20];
+int hitcount = 0;
+bool onetime = true;
+
+bool sequenceplay = false;
+int changeuptimer = 0;
+unsigned long chordtime;
+int chordclock;
+int midinoteroot = 48;
+
+int chordnoteindex;
+
+int crazy0 = 0;
+int crazy1 = 0;
+
+
+int lastchannel1;
+int lastchannel2;
+int lastchannel3;
+int lastchannel4;
